@@ -1,5 +1,7 @@
-import logging 
+
+import logging
 import os
+import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,6 +15,12 @@ from telegram.ext import (
 )
 import psycopg2
 from fpdf import FPDF
+from io import BytesIO
+import asyncio
+from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+from telegram.error import NetworkError, TimedOut
 
 # Явно укажем, что это веб-сервис
 WEB_SERVICE = True
@@ -27,7 +35,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Validate environment variables
 if not TELEGRAM_TOKEN or not DIRECTOR_CHAT_ID or not DATABASE_URL:
-    raise ValueError("Missing required environment variables: TELEGRAM_TOKEN and DIRECTOR_CHAT_ID and DATABASE_URL")
+    raise ValueError("Missing required environment variables: TELEGRAM_TOKEN, DIRECTOR_CHAT_ID, or DATABASE_URL")
 
 try:
     DIRECTOR_CHAT_ID = int(DIRECTOR_CHAT_ID)
@@ -110,13 +118,11 @@ async def send_message_with_keyboard(update, context, text, keyboard):
 async def send_and_remember(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None
 ):
-    """Deprecated: Use send_message_with_keyboard instead."""
+    """Send message and store its ID, deleting previous message."""
     return await send_message_with_keyboard(update, context, text, reply_markup)
-
 
 async def safe_db_connection(retries=3, delay=2):
     """Try to establish DB connection with retries."""
-    import asyncio
     for attempt in range(retries):
         try:
             conn = get_db_connection()
@@ -127,7 +133,6 @@ async def safe_db_connection(retries=3, delay=2):
                 await asyncio.sleep(delay)
             else:
                 raise
-
 
 async def send_text_with_keyboard(update, context, text, keyboard=None):
     """Helper to send message with keyboard, deleting previous message if any."""
@@ -142,16 +147,12 @@ async def send_text_with_keyboard(update, context, text, keyboard=None):
         logger.error(f"Error sending message: {e}")
         raise
 
-
 async def safe_send_message(update, context, text, keyboard=None):
     """Wrapper to safely send message with keyboard and handle errors."""
     try:
         return await send_text_with_keyboard(update, context, text, keyboard)
     except Exception as e:
         logger.error(f"Failed to send message: {e}")
-        # Optionally notify user or ignore silently
-
-import asyncio
 
 async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /clear command to fully reset chat history as fast as possible."""
@@ -159,30 +160,23 @@ async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     try:
-        # Clear all context data
         context.user_data.clear()
         context.chat_data.clear()
         
-        # Get the latest message ID
         current_message_id = update.message.message_id
-        
-        # Collect message IDs to delete (assuming we try up to 1000 messages)
         message_ids = list(range(max(1, current_message_id - 1000), current_message_id + 1))
         
-        # Function to attempt deleting a single message
         async def delete_single_message(msg_id):
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
-                pass  # Silently skip errors (e.g., message not found or no permissions)
+                pass
         
-        # Delete messages in parallel batches
-        batch_size = 50  # Telegram rate limits suggest batches of ~50
+        batch_size = 50
         for i in range(0, len(message_ids), batch_size):
             batch = message_ids[i:i + batch_size]
             await asyncio.gather(*[delete_single_message(msg_id) for msg_id in batch])
         
-        # Send message prompting to restart
         await update.message.reply_text(
             "🧹 Чат полностью очищен! Нажмите /start, чтобы начать заново."
         )
@@ -191,7 +185,7 @@ async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ Не удалось полностью очистить чат. Попробуйте снова или используйте /start."
         )
-        
+
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate bot shutdown with confirmation."""
     if not await is_admin(update.effective_user.id):
@@ -208,17 +202,14 @@ async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardMarkup(keyboard),
     )
 
-
 async def confirm_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clean shutdown of the bot."""
     if not await is_admin(update.effective_user.id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
     await safe_send_message(update, context, "🛑 Бот останавливается...")
-    # Use a cleaner shutdown if possible
     import sys
     sys.exit(0)
-
 
 async def process_report_period(
     update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str
@@ -241,10 +232,8 @@ async def process_report_period(
         return
     await generate_and_send_report(update, context, start_date, end_date)
 
-
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user phone and save resident data with comprehensive validation."""
-    # Validate phone format
     phone = update.message.text.strip()
     phone_pattern = re.compile(r"^\+?\d{7,15}$")
     if not phone_pattern.match(phone):
@@ -256,12 +245,10 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Sanitize phone number
     phone = re.sub(r"[^\d+]", "", phone)
     
     conn = None
     try:
-        # Validate all required fields exist
         required_fields = {
             'user_name': str,
             'user_address': str,
@@ -280,7 +267,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
-        # Validate field types
         type_errors = []
         for field, field_type in required_fields.items():
             if not isinstance(context.user_data[field], field_type):
@@ -298,7 +284,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Check if user already exists
             cur.execute(
                 "SELECT resident_id FROM residents WHERE chat_id = %s",
                 (update.effective_user.id,)
@@ -311,7 +296,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
                 )
 
-            # Save resident data
             cur.execute(
                 """INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
                 VALUES (%s, %s, %s, %s, %s) RETURNING resident_id""",
@@ -325,7 +309,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             resident_id = cur.fetchone()[0]
 
-            # Save issue
             cur.execute(
                 """INSERT INTO issues (resident_id, description, category, status, created_at)
                 VALUES (%s, %s, %s, %s, %s) RETURNING issue_id""",
@@ -339,7 +322,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             issue_id = cur.fetchone()[0]
 
-            # Log the action
             cur.execute(
                 """INSERT INTO issue_logs (issue_id, action, user_id, action_time)
                 VALUES (%s, 'create', %s, NOW())""",
@@ -348,11 +330,9 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             conn.commit()
 
-            # Send urgent alert if needed
             if context.user_data["is_urgent"]:
                 await send_urgent_alert(update, context, issue_id)
 
-            # Success message
             await send_and_remember(
                 update,
                 context,
@@ -362,7 +342,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
             )
             
-            # Clear context
             context.user_data.clear()
 
     except psycopg2.IntegrityError as e:
@@ -375,7 +354,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         if conn:
             conn.rollback()
-            
     except psycopg2.Error as e:
         logger.error(f"Database error during registration: {e}")
         await send_and_remember(
@@ -386,7 +364,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         if conn:
             conn.rollback()
-            
     except Exception as e:
         logger.error(f"Unexpected error during registration: {e}", exc_info=True)
         await send_and_remember(
@@ -397,7 +374,6 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         if conn:
             conn.rollback()
-            
     finally:
         if conn:
             conn.close()
@@ -434,7 +410,7 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """
                 INSERT INTO users (user_id, full_name, role, registration_date)
                 VALUES (%s, %s, %s, %s)
-            """,
+                """,
                 (agent_id, agent_name, SUPPORT_ROLES["agent"], datetime.now()),
             )
             conn.commit()
@@ -448,7 +424,15 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("awaiting_agent_name", None)
     except psycopg2.Error as e:
         logger.error(f"Error adding agent: {e}")
-        await safe_send_message
+        await safe_send_message(
+            update,
+            context,
+            "❌ Ошибка при добавлении агента.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+    finally:
+        if conn:
+            conn.close()
 
 def main_menu_keyboard(user_id, role):
     """Generate main menu keyboard based on user role."""
@@ -516,7 +500,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 WHERE r.chat_id = %s
                 ORDER BY i.created_at DESC
                 LIMIT 5
-            """,
+                """,
                 (update.effective_user.id,),
             )
             requests = cur.fetchall()
@@ -570,7 +554,6 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Проверяем, зарегистрирован ли пользователь
             cur.execute(
                 "SELECT resident_id FROM residents WHERE chat_id = %s",
                 (update.effective_user.id,)
@@ -578,7 +561,6 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             resident = cur.fetchone()
 
         if resident:
-            # Если пользователь зарегистрирован - сохраняем заявку
             issue_id = await save_request_to_db(update, context, resident[0])
             await send_and_remember(
                 update,
@@ -590,7 +572,6 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
                 await send_urgent_alert(update, context, issue_id)
             return
 
-        # Если пользователь не зарегистрирован - начинаем процесс регистрации
         await send_and_remember(
             update,
             context,
@@ -611,7 +592,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         if conn:
             conn.close()
-            
+
 async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, resident_id: int):
     logger.info(f"Attempting to save request. Resident ID: {resident_id}")
     logger.info(f"Context data: {context.user_data}")
@@ -619,20 +600,17 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Проверка существования resident_id
             cur.execute("SELECT 1 FROM residents WHERE resident_id = %s", (resident_id,))
             if not cur.fetchone():
                 logger.error(f"Resident {resident_id} not found in database")
                 raise ValueError(f"Resident {resident_id} not found")
             
-            # Проверка данных
             required_fields = ['problem_text', 'is_urgent']
             for field in required_fields:
                 if field not in context.user_data:
                     logger.error(f"Missing required field: {field}")
                     raise ValueError(f"Missing {field}")
             
-            # Сохранение заявки
             cur.execute(
                 """INSERT INTO issues (resident_id, description, category, status, created_at)
                 VALUES (%s, %s, %s, %s, %s) RETURNING issue_id""",
@@ -703,77 +681,6 @@ async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYP
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
     )
 
-import re
-
-async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process user phone and save resident data with validation."""
-    phone = update.message.text.strip()
-    phone_pattern = re.compile(r"^\+?\d{7,15}$")  # Simple phone validation: digits with optional +, length 7-15
-    if not phone_pattern.match(phone):
-        await send_and_remember(
-            update,
-            context,
-            "❌ Неверный формат телефона. Пожалуйста, введите корректный номер (например, +71234567890):",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-        )
-        return
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
-                VALUES (%s, %s, %s, %s, %s) RETURNING resident_id
-            """,
-                (
-                    update.effective_user.id,
-                    context.user_data["user_name"],
-                    context.user_data["user_address"],
-                    phone,
-                    datetime.now(),
-                ),
-            )
-            resident_id = cur.fetchone()[0]
-            cur.execute(
-                """
-                INSERT INTO issues (resident_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, 'new', %s) RETURNING issue_id
-            """,
-                (
-                    resident_id,
-                    context.user_data["problem_text"],
-                    "urgent" if context.user_data["is_urgent"] else "normal",
-                    datetime.now(),
-                ),
-            )
-            issue_id = cur.fetchone()[0]
-            conn.commit()
-
-        if context.user_data["is_urgent"]:
-            await send_urgent_alert(update, context, issue_id)
-
-        await send_and_remember(
-            update,
-            context,
-            "✅ Регистрация и заявка приняты!\n\n"
-            f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
-        context.user_data.clear()
-    except psycopg2.Error as e:
-        logger.error(f"Error during registration: {e}")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка при регистрации.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
-    finally:
-        if conn:
-            conn.close()
-
 async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active requests for agents."""
     if not await is_agent(update.effective_user.id):
@@ -791,7 +698,7 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
                 WHERE i.status = 'new'
                 ORDER BY i.created_at DESC
                 LIMIT 20
-            """
+                """
             )
             requests = cur.fetchall()
 
@@ -850,7 +757,7 @@ async def show_request_detail(
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.issue_id = %s
-            """,
+                """,
                 (issue_id,),
             )
             request = cur.fetchone()
@@ -940,7 +847,7 @@ async def save_solution(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.issue_id = %s
-            """,
+                """,
                 (issue_id,),
             )
             issue_data = cur.fetchone()
@@ -963,14 +870,14 @@ async def save_solution(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     completed_at = NOW(),
                     closed_by = %s
                 WHERE issue_id = %s
-            """,
+                """,
                 (solution, update.effective_user.id, issue_id),
             )
             cur.execute(
                 """
                 INSERT INTO issue_logs (issue_id, action, user_id, action_time)
                 VALUES (%s, 'complete', %s, NOW())
-            """,
+                """,
                 (issue_id, update.effective_user.id),
             )
             conn.commit()
@@ -1022,7 +929,7 @@ async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYP
                 WHERE i.status = 'new' AND i.category = 'urgent'
                 ORDER BY i.created_at DESC
                 LIMIT 20
-            """
+                """
             )
             requests = cur.fetchall()
 
@@ -1108,7 +1015,6 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"{'🚨 Срочная' if issue[4] == 'urgent' else '📋 Обычная'}\n\n"
             )
 
-        # Добавляем только кнопку "Назад"
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
 
         await send_and_remember(
@@ -1136,7 +1042,6 @@ def generate_pdf_report(start_date, end_date):
         pdf = FPDF()
         pdf.add_page()
         
-        # Load DejaVuSans font for Cyrillic support
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found. Please place it in the script directory.")
@@ -1157,12 +1062,11 @@ def generate_pdf_report(start_date, end_date):
                 LEFT JOIN users u ON i.closed_by = u.user_id
                 WHERE i.created_at BETWEEN %s AND %s
                 ORDER BY i.created_at DESC
-            """,
+                """,
                 (start_date, end_date),
             )
             issues = cur.fetchall()
 
-        # Helper function to clean text for PDF
         def clean_text(text):
             try:
                 return text.encode('utf-8', errors='replace').decode('utf-8')
@@ -1170,7 +1074,6 @@ def generate_pdf_report(start_date, end_date):
                 logger.error(f"Error cleaning text '{text}': {e}")
                 return str(text).encode('ascii', errors='replace').decode('ascii')
 
-        # Set title
         pdf.cell(200, 10, txt=clean_text("Отчет по заявкам ЖК"), ln=1, align="C")
         pdf.cell(
             200,
@@ -1181,8 +1084,7 @@ def generate_pdf_report(start_date, end_date):
         )
         pdf.ln(10)
 
-        # Calculate dynamic column widths based on content
-        col_widths = [40, 40, 60, 25, 25, 30]  # Initial widths
+        col_widths = [40, 40, 60, 25, 25, 30]
         for issue in issues:
             col_widths[0] = max(col_widths[0], len(clean_text(issue[0])) * 2.5)
             col_widths[1] = max(col_widths[1], len(clean_text(issue[1])) * 2.5)
@@ -1191,21 +1093,18 @@ def generate_pdf_report(start_date, end_date):
             col_widths[4] = max(col_widths[4], len(clean_text(issue[4])) * 2.5)
             col_widths[5] = max(col_widths[5], len(clean_text(issue[7])) * 2.5)
 
-        # Ensure total width doesn't exceed page width (adjust if necessary)
         total_width = sum(col_widths)
-        if total_width > 190:  # Page width is ~200mm, leave some margin
+        if total_width > 190:
             scale_factor = 190 / total_width
             col_widths = [w * scale_factor for w in col_widths]
 
-        # Set table headers
         pdf.set_font("DejaVuSans", size=10)
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         for i, header in enumerate(headers):
             pdf.cell(col_widths[i], 8, clean_text(header), border=1, align="C")
         pdf.ln()
 
-        # Add table rows with MultiCell for text wrapping
-        base_height = 5  # Base height per line
+        base_height = 5
         for issue in issues:
             full_name = clean_text(issue[0])
             address = clean_text(issue[1])
@@ -1214,7 +1113,6 @@ def generate_pdf_report(start_date, end_date):
             status = clean_text(issue[4])
             closed_by = clean_text(issue[7])
 
-            # Calculate number of lines for each cell (approximate)
             def get_line_count(text, width):
                 return max(1, int(len(text) * pdf.font_size / (width / 2.5)))
 
@@ -1228,11 +1126,9 @@ def generate_pdf_report(start_date, end_date):
             )
             row_height = base_height * max_lines
 
-            # Starting x position for the row
             start_x = pdf.get_x()
             start_y = pdf.get_y()
 
-            # Use MultiCell for each column
             pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L")
             pdf.set_xy(start_x + col_widths[0], start_y)
             pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L")
@@ -1245,15 +1141,13 @@ def generate_pdf_report(start_date, end_date):
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4], start_y)
             pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L")
 
-            # Move to the next row
             pdf.set_xy(start_x, start_y + row_height)
 
-        # Save PDF
-        os.makedirs("reports", exist_ok=True)
-        filename = f"reports/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        pdf.output(filename)
-        logger.info(f"PDF report generated: {filename}")
-        return filename
+        pdf_output = BytesIO()
+        pdf.output(pdf_output)
+        pdf_output.seek(0)
+        logger.info("PDF report generated in memory")
+        return pdf_output
     except psycopg2.Error as e:
         logger.error(f"Database error generating PDF: {e}")
         raise Exception(f"Database error: {e}")
@@ -1264,109 +1158,24 @@ def generate_pdf_report(start_date, end_date):
         if conn:
             conn.close()
 
-async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate report command."""
-    if not await is_admin(update.effective_user.id):
-        await update.callback_query.answer("❌ Эта команда доступна только администратору.", show_alert=True)
-        return
-    keyboard = [
-        [InlineKeyboardButton("📅 За последние 7 дней", callback_data="report_7")],
-        [InlineKeyboardButton("📅 За последние 30 дней", callback_data="report_30")],
-        [InlineKeyboardButton("📅 За текущий месяц", callback_data="report_month")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
-    ]
-    await send_and_remember(
-        update,
-        context,
-        "📊 Выберите период для отчета:",
-        InlineKeyboardMarkup(keyboard),
-    )
-
-async def process_report_period(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str
-):
-    """Process selected report period."""
-    end_date = datetime.now()
-    if period_type == "7":
-        start_date = end_date - timedelta(days=7)
-    elif period_type == "30":
-        start_date = end_date - timedelta(days=30)
-    elif period_type == "month":
-        start_date = end_date.replace(day=1)
-    await generate_and_send_report(update, context, start_date, end_date)
-
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
 ):
     """Generate and send PDF report."""
     processing_msg = await update.effective_chat.send_message("🔄 Генерация отчета...")
     try:
-        report_path = generate_pdf_report(start_date, end_date)
-        with open(report_path, "rb") as report_file:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=report_file,
-                caption=f"📊 Отчет за период с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}",
-            )
+        pdf_output = generate_pdf_report(start_date, end_date)
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=pdf_output,
+            filename=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            caption=f"📊 Отчет за период с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}",
+        )
         await processing_msg.delete()
         await start(update, context)
     except Exception as e:
         logger.error(f"Error generating report: {e}")
         await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {e}")
-
-async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show agent management menu."""
-    if not await is_admin(update.effective_user.id):
-        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
-        return
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT user_id, username, full_name, role 
-                FROM users 
-                WHERE role IN (%s, %s)
-                ORDER BY role DESC
-            """,
-                (SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]),
-            )
-            agents = cur.fetchall()
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    f"{'👑 Админ' if agent[3] == SUPPORT_ROLES['admin'] else '🛠️ Агент'}: {agent[2]} (@{agent[1] or 'нет'})",
-                    callback_data=f"agent_info_{agent[0]}",
-                )
-            ]
-            for agent in agents
-        ]
-        keyboard.append([InlineKeyboardButton("➕ Добавить агента", callback_data="add_agent")])
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
-
-        text = "👥 Управление персоналом:\n\n"
-        if not agents:
-            text += "Нет зарегистрированных сотрудников"
-
-        await send_and_remember(
-            update,
-            context,
-            text,
-            InlineKeyboardMarkup(keyboard),
-        )
-    except psycopg2.Error as e:
-        logger.error(f"Database error in manage_agents_menu: {e}")
-        await send_and_remember(
-            update,
-            context,
-            f"❌ Ошибка базы данных: {e}",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
-    finally:
-        if conn:
-            conn.close()
 
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate bot shutdown with confirmation."""
@@ -1456,14 +1265,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "completed_requests":
             await completed_requests(update, context)
         elif query.data == "reports_menu":
-            await generate_report_command(update, context)
+            keyboard = [
+                [InlineKeyboardButton("📅 Последние 7 дней", callback_data="report_7")],
+                [InlineKeyboardButton("📅 Последние 30 дней", callback_data="report_30")],
+                [InlineKeyboardButton("📅 Текущий месяц", callback_data="report_month")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+            ]
+            await send_and_remember(
+                update,
+                context,
+                "📊 Выберите период отчета:",
+                InlineKeyboardMarkup(keyboard),
+            )
         elif query.data == "manage_agents":
             await manage_agents_menu(update, context)
         elif query.data == "shutdown_bot":
             await shutdown_bot(update, context)
         elif query.data == "confirm_shutdown":
-            await send_and_remember(update, context, "🛑 Бот останавливается...")
-            os._exit(0)
+            await confirm_shutdown(update, context)
         elif query.data == "cancel_shutdown":
             await start(update, context)
         elif query.data.startswith("report_"):
@@ -1528,7 +1347,7 @@ async def show_agent_info(
                 SELECT user_id, username, full_name, role, registration_date
                 FROM users
                 WHERE user_id = %s
-            """,
+                """,
                 (agent_id,),
             )
             agent = cur.fetchone()
@@ -1608,12 +1427,10 @@ async def add_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["awaiting_agent_id"] = True
 
-import re
-
 async def process_new_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process new agent ID with validation."""
     agent_id_text = update.message.text.strip()
-    if not re.match(r"^\d{5,20}$", agent_id_text):  # Telegram IDs are numeric, length 5-20 digits
+    if not re.match(r"^\d{5,20}$", agent_id_text):
         await send_and_remember(
             update,
             context,
@@ -1640,56 +1457,47 @@ async def process_new_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="manage_agents")]]),
         )
 
-async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save new agent to database."""
-    if (
-        "new_agent_id" not in context.user_data
-        or "awaiting_agent_name" not in context.user_data
-    ):
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка: данные агента не найдены.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
+async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show manage agents menu."""
+    if not await is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
-    agent_name = update.message.text
-    agent_id = context.user_data["new_agent_id"]
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (agent_id,))
-            if cur.fetchone():
-                await send_and_remember(
-                    update,
-                    context,
-                    "❌ Пользователь с таким ID уже существует.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-                )
-                return
-            cur.execute(
-                """
-                INSERT INTO users (user_id, full_name, role, registration_date)
-                VALUES (%s, %s, %s, %s)
-            """,
-                (agent_id, agent_name, SUPPORT_ROLES["agent"], datetime.now()),
+            cur.execute("SELECT user_id, full_name FROM users WHERE role = %s", (SUPPORT_ROLES["agent"],))
+            agents = cur.fetchall()
+
+        if not agents:
+            await send_and_remember(
+                update,
+                context,
+                "👥 Нет зарегистрированных агентов.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("➕ Добавить агента", callback_data="add_agent")],
+                                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]),
             )
-            conn.commit()
+            return
+
+        keyboard = [
+            [InlineKeyboardButton(f"👤 {agent[1]} (ID: {agent[0]})", callback_data=f"agent_info_{agent[0]}")]
+            for agent in agents
+        ]
+        keyboard.append([InlineKeyboardButton("➕ Добавить агента", callback_data="add_agent")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+
         await send_and_remember(
             update,
             context,
-            f"✅ Новый агент {agent_name} (ID: {agent_id}) успешно добавлен!",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            "👥 Управление персоналом:",
+            InlineKeyboardMarkup(keyboard),
         )
-        context.user_data.pop("new_agent_id", None)
-        context.user_data.pop("awaiting_agent_name", None)
     except psycopg2.Error as e:
-        logger.error(f"Error adding agent: {e}")
+        logger.error(f"Error retrieving agents: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка при добавлении агента.",
+            "❌ Ошибка при получении данных.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
     finally:
@@ -1715,15 +1523,11 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "awaiting_user_message" in context.user_data:
         await send_user_message(update, context)
 
-from telegram.error import NetworkError, TimedOut
-
-from telegram.error import NetworkError, TimedOut
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     error = context.error
     if isinstance(error, (NetworkError, TimedOut)):
-        print(f"⚠️ Network error: {error}. Reconnecting...")
+        logger.warning(f"⚠️ Network error: {error}. Reconnecting...")
         return
     
     logger.error("Exception:", exc_info=error)
@@ -1735,19 +1539,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
 
-import os
-from threading import Thread
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import time
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
-
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
-            # Проверяем соединения с БД и Telegram
             try:
                 conn = get_db_connection()
                 conn.close()
@@ -1761,23 +1558,47 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_check():
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
-    # Явно укажем, что сервер должен работать непрерывно
+    logger.info(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
     server.serve_forever()
 
 def start_health_server():
     server_thread = Thread(target=run_health_check, daemon=True)
     server_thread.start()
-    # Ждем чтобы сервер точно запустился
     time.sleep(5)
     return server_thread
+
+async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /report command to initiate report generation."""
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role < SUPPORT_ROLES["admin"]:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Доступ запрещен. Только администраторы могут генерировать отчеты.",
+            main_menu_keyboard(user_id, role),
+        )
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Последние 7 дней", callback_data="report_7")],
+        [InlineKeyboardButton("📅 Последние 30 дней", callback_data="report_30")],
+        [InlineKeyboardButton("📅 Текущий месяц", callback_data="report_month")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+    ]
+    await send_and_remember(
+        update,
+        context,
+        "📊 Выберите период отчета:",
+        InlineKeyboardMarkup(keyboard),
+    )
 
 def main() -> None:
     """Run the bot with auto-restart."""
     while True:
         try:
-            health_server = start_health_server()  # Исправлено на start_health_server
-            print("🔄 Initializing bot...")
+            health_server = start_health_server()
+            logger.info("🔄 Initializing bot...")
             application = Application.builder().token(TELEGRAM_TOKEN).build()
 
             application.add_handler(CommandHandler("start", start))
@@ -1787,22 +1608,21 @@ def main() -> None:
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
             application.add_error_handler(error_handler)
 
-            print("🚀 Starting bot polling...")
+            logger.info("🚀 Starting bot polling...")
             application.run_polling(
                 drop_pending_updates=True,
                 close_loop=False,
                 allowed_updates=Update.ALL_TYPES
             )
         except KeyboardInterrupt:
-            print("🛑 Bot stopped by user")
+            logger.info("🛑 Bot stopped by user")
             break
         except Exception as e:
-            print(f"⚠️ Bot crashed: {str(e)[:200]}")  # Ограничим длину лога
-            print("🔄 Restarting in 10 seconds...")
+            logger.error(f"⚠️ Bot crashed: {str(e)[:200]}")
+            logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
 
 if __name__ == '__main__':
-    print("🛠 Starting application...")
-    # Дополнительная задержка для Render
+    logger.info("🛠 Starting application...")
     time.sleep(8)
     main()
