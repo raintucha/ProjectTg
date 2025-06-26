@@ -16,13 +16,14 @@ from fpdf import FPDF
 
 # Load configuration
 load_dotenv()
-TELEGRAM_TOKEN = "7671781517:AAHYA3DmFF-2BFpHi02ZD9LTdKR5EowdFHw"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DIRECTOR_CHAT_ID = os.getenv("DIRECTOR_CHAT_ID")
 NEWS_CHANNEL = os.getenv("NEWS_CHANNEL", "@sunqar_news")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Validate environment variables
-if not TELEGRAM_TOKEN or not DIRECTOR_CHAT_ID:
-    raise ValueError("Missing required environment variables: TELEGRAM_TOKEN and DIRECTOR_CHAT_ID")
+if not TELEGRAM_TOKEN or not DIRECTOR_CHAT_ID or not DATABASE_URL:
+    raise ValueError("Missing required environment variables: TELEGRAM_TOKEN and DIRECTOR_CHAT_ID and DATABASE_URL")
 
 try:
     DIRECTOR_CHAT_ID = int(DIRECTOR_CHAT_ID)
@@ -39,15 +40,9 @@ logger = logging.getLogger(__name__)
 SUPPORT_ROLES = {"user": 1, "agent": 2, "admin": 3}
 
 def get_db_connection():
-    """Establish database connection with retry."""
+    """Establish database connection using DATABASE_URL."""
     try:
-        conn = psycopg2.connect(
-            host=os.getenv("DB_HOST", "localhost"),
-            database=os.getenv("DB_NAME", "support_bot"),
-            user=os.getenv("DB_USER", "bot_user"),
-            password=os.getenv("DB_PASSWORD"),
-            port=os.getenv("DB_PORT", "5432"),
-        )
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         logger.info("Successfully connected to database")
         return conn
     except psycopg2.Error as e:
