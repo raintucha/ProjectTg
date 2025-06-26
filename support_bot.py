@@ -16,7 +16,7 @@ from fpdf import FPDF
 
 # Явно укажем, что это веб-сервис
 WEB_SERVICE = True
-PORT = int(os.getenv("PORT", 10000))
+PORT = int(os.getenv("PORT", 8080))
 
 # Load configuration
 load_dotenv()
@@ -1759,7 +1759,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 def run_health_check():
-    port = int(os.getenv("PORT", 10000))
+    port = int(os.getenv("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     print(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
     # Явно укажем, что сервер должен работать непрерывно
