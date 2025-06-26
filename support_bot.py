@@ -465,7 +465,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_and_remember(
         update,
         context,
-        "🏠 Главное меню службы поддержки ЖК\n\nВыберите действие:",
+        "🏠 Добро Пожаловать в службу поддержки ЖК Сункар\n\nВыберите действие:",
         main_menu_keyboard(user_id, role, is_in_main_menu=True),
     )
 
