@@ -1714,13 +1714,16 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     logger.error("Exception:", exc_info=context.error)
-    await send_and_remember(
-        update,
-        context,
-        "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
-        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-    )
-
+    if update and update.effective_user:
+        await send_and_remember(
+            update,
+            context,
+            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+    else:
+        logger.warning("No update object available to send error message.")
+        
 def main() -> None:
     """Run the bot."""
     application = Application.builder().token(TELEGRAM_TOKEN).build()
