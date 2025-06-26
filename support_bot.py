@@ -1167,12 +1167,11 @@ async def generate_and_send_report(
     processing_msg = await update.effective_chat.send_message("🔄 Генерация отчета...")
     try:
         pdf_output = generate_pdf_report(start_date, end_date)
-        pdf_output.seek(0)  # Ensure the cursor is at the beginning of the BytesIO object
-        # Set a name attribute for the BytesIO object
-        pdf_output.name = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        pdf_output.seek(0)  # Ensure the cursor is at the beginning
+        pdf_bytes = pdf_output.read()  # Read the BytesIO content as bytes
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
-            document=pdf_output,
+            document=pdf_bytes,  # Send raw bytes
             filename=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             caption=f"📊 Отчет за период с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}",
         )
@@ -1181,6 +1180,8 @@ async def generate_and_send_report(
     except Exception as e:
         logger.error(f"Error generating report: {e}")
         await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {e}")
+    finally:
+        pdf_output.close()  # Ensure the BytesIO object is closed
         
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate bot shutdown with confirmation."""
