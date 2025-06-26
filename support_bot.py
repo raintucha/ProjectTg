@@ -1035,7 +1035,7 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if conn:
             conn.close()
 
-              
+            
 
 def generate_pdf_report(start_date, end_date):
     """Generate PDF report."""
@@ -1168,6 +1168,8 @@ async def generate_and_send_report(
     try:
         pdf_output = generate_pdf_report(start_date, end_date)
         pdf_output.seek(0)  # Ensure the cursor is at the beginning of the BytesIO object
+        # Set a name attribute for the BytesIO object
+        pdf_output.name = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=pdf_output,
@@ -1179,7 +1181,7 @@ async def generate_and_send_report(
     except Exception as e:
         logger.error(f"Error generating report: {e}")
         await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {e}")
-
+        
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate bot shutdown with confirmation."""
     if not await is_admin(update.effective_user.id):
