@@ -1035,6 +1035,8 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if conn:
             conn.close()
 
+              
+
 def generate_pdf_report(start_date, end_date):
     """Generate PDF report."""
     conn = None
@@ -1165,6 +1167,7 @@ async def generate_and_send_report(
     processing_msg = await update.effective_chat.send_message("🔄 Генерация отчета...")
     try:
         pdf_output = generate_pdf_report(start_date, end_date)
+        pdf_output.seek(0)  # Ensure the cursor is at the beginning of the BytesIO object
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=pdf_output,
