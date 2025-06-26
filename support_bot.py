@@ -1724,26 +1724,37 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         logger.warning("No update object available to send error message.")
 
+import os
 from threading import Thread
-import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
 
-class DummyServer(BaseHTTPRequestHandler):
+class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        if self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-def run_dummy_server():
+def run_health_check():
     port = int(os.getenv("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), DummyServer)
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"Health check server running on port {port}")
     server.serve_forever()
 
-# Запускаем фиктивный сервер в отдельном потоке
-Thread(target=run_dummy_server, daemon=True).start()
+def start_server():
+    # Даем серверу время запуститься перед основным приложением
+    server_thread = Thread(target=run_health_check, daemon=True)
+    server_thread.start()
+    time.sleep(3)  # Важно: даем время серверу запуститься
+    return server_thread
 
 def main() -> None:
     """Run the bot."""
+    server_thread = start_server()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("report", generate_report_command))
@@ -1752,8 +1763,12 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
     application.add_error_handler(error_handler)
 
+   
     try:
         application.run_polling()
-    except telegram.error.Conflict:
-        logger.error("Conflict detected: Another instance is running. Shutting down.")
-        os._exit(1)  # Завершение процесса с ошибкой
+    except Exception as e:
+        print(f"Bot crashed: {e}")
+    finally:
+        # Теоретически, это не нужно для daemon thread, но на всякий случай
+        if server_thread.is_alive():
+            print("Shutting down health check server")
