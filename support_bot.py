@@ -1723,7 +1723,25 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         logger.warning("No update object available to send error message.")
-        
+
+from threading import Thread
+import socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class DummyServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_dummy_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), DummyServer)
+    server.serve_forever()
+
+# Запускаем фиктивный сервер в отдельном потоке
+Thread(target=run_dummy_server, daemon=True).start()
+
 def main() -> None:
     """Run the bot."""
     application = Application.builder().token(TELEGRAM_TOKEN).build()
