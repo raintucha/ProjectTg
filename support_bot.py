@@ -14,6 +14,10 @@ from telegram.ext import (
 import psycopg2
 from fpdf import FPDF
 
+# Явно укажем, что это веб-сервис
+WEB_SERVICE = True
+PORT = int(os.getenv("PORT", 10000))
+
 # Load configuration
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -1730,7 +1734,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
-        
+
 import os
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1756,9 +1760,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def run_health_check():
     port = int(os.getenv("PORT", 10000))
-    with HTTPServer(('0.0.0.0', port), HealthCheckHandler) as server:
-        print(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
-        server.serve_forever()
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
+    # Явно укажем, что сервер должен работать непрерывно
+    server.serve_forever()
 
 def start_health_server():
     server_thread = Thread(target=run_health_check, daemon=True)
@@ -1771,7 +1776,7 @@ def main() -> None:
     """Run the bot with auto-restart."""
     while True:
         try:
-            health_server = start_health_check()
+            health_server = start_health_server()  # Исправлено на start_health_server
             print("🔄 Initializing bot...")
             application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -1785,11 +1790,14 @@ def main() -> None:
             print("🚀 Starting bot polling...")
             application.run_polling(
                 drop_pending_updates=True,
-                close_loop=False,  # Важно для переподключения
+                close_loop=False,
                 allowed_updates=Update.ALL_TYPES
             )
+        except KeyboardInterrupt:
+            print("🛑 Bot stopped by user")
+            break
         except Exception as e:
-            print(f"⚠️ Bot crashed: {e}")
+            print(f"⚠️ Bot crashed: {str(e)[:200]}")  # Ограничим длину лога
             print("🔄 Restarting in 10 seconds...")
             time.sleep(10)
 
