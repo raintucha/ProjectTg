@@ -1728,6 +1728,7 @@ import os
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -1741,21 +1742,23 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def run_health_check():
     port = int(os.getenv("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"Health check server running on port {port}")
-    server.serve_forever()
+    with HTTPServer(('0.0.0.0', port), HealthCheckHandler) as server:
+        print(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
+        server.serve_forever()
 
-def start_server():
-    # Даем серверу время запуститься перед основным приложением
+def start_health_server():
     server_thread = Thread(target=run_health_check, daemon=True)
     server_thread.start()
-    time.sleep(3)  # Важно: даем время серверу запуститься
+    # Ждем чтобы сервер точно запустился
+    time.sleep(5)
     return server_thread
 
 def main() -> None:
     """Run the bot."""
-    server_thread = start_server()
+    health_server = start_health_server()
+    print("🔄 Initializing bot...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("report", generate_report_command))
     application.add_handler(CommandHandler("clear", clear_chat))
@@ -1763,12 +1766,19 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
     application.add_error_handler(error_handler)
 
-   
     try:
-        application.run_polling()
+        conn = get_db_connection()
+        conn.close()
+        print("✅ Database connection successful")
     except Exception as e:
-        print(f"Bot crashed: {e}")
-    finally:
-        # Теоретически, это не нужно для daemon thread, но на всякий случай
-        if server_thread.is_alive():
-            print("Shutting down health check server")
+        print(f"❌ Database connection failed: {e}")
+        raise
+
+    print("🚀 Starting bot polling...")
+    application.run_polling(drop_pending_updates=True)
+
+if __name__ == '__main__':
+    print("🛠 Starting application...")
+    # Дополнительная задержка для Render
+    time.sleep(8)
+    main()
