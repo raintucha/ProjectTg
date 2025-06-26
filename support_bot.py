@@ -1711,9 +1711,18 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "awaiting_user_message" in context.user_data:
         await send_user_message(update, context)
 
+from telegram.error import NetworkError, TimedOut
+
+from telegram.error import NetworkError, TimedOut
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
-    logger.error("Exception:", exc_info=context.error)
+    error = context.error
+    if isinstance(error, (NetworkError, TimedOut)):
+        print(f"⚠️ Network error: {error}. Reconnecting...")
+        return
+    
+    logger.error("Exception:", exc_info=error)
     if update and update.effective_user:
         await send_and_remember(
             update,
@@ -1721,9 +1730,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
-    else:
-        logger.warning("No update object available to send error message.")
-
+        
 import os
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1734,8 +1741,15 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             self.send_response(200)
+            self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(b'OK')
+            # Проверяем соединения с БД и Telegram
+            try:
+                conn = get_db_connection()
+                conn.close()
+                self.wfile.write(b'OK DB OK')
+            except Exception as e:
+                self.wfile.write(f'DB ERROR: {str(e)}'.encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -1754,28 +1768,30 @@ def start_health_server():
     return server_thread
 
 def main() -> None:
-    """Run the bot."""
-    health_server = start_health_server()
-    print("🔄 Initializing bot...")
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    """Run the bot with auto-restart."""
+    while True:
+        try:
+            health_server = start_health_check()
+            print("🔄 Initializing bot...")
+            application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("report", generate_report_command))
-    application.add_handler(CommandHandler("clear", clear_chat))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
-    application.add_error_handler(error_handler)
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("report", generate_report_command))
+            application.add_handler(CommandHandler("clear", clear_chat))
+            application.add_handler(CallbackQueryHandler(button_handler))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
+            application.add_error_handler(error_handler)
 
-    try:
-        conn = get_db_connection()
-        conn.close()
-        print("✅ Database connection successful")
-    except Exception as e:
-        print(f"❌ Database connection failed: {e}")
-        raise
-
-    print("🚀 Starting bot polling...")
-    application.run_polling(drop_pending_updates=True)
+            print("🚀 Starting bot polling...")
+            application.run_polling(
+                drop_pending_updates=True,
+                close_loop=False,  # Важно для переподключения
+                allowed_updates=Update.ALL_TYPES
+            )
+        except Exception as e:
+            print(f"⚠️ Bot crashed: {e}")
+            print("🔄 Restarting in 10 seconds...")
+            time.sleep(10)
 
 if __name__ == '__main__':
     print("🛠 Starting application...")
