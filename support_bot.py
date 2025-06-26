@@ -50,6 +50,47 @@ logger = logging.getLogger(__name__)
 
 # Role constants
 SUPPORT_ROLES = {"user": 1, "agent": 2, "admin": 3}
+def init_db():
+    """Initialize database tables if they don't exist."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Создание таблицы users
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT NOT NULL,
+                    role INTEGER NOT NULL,
+                    registration_date TIMESTAMP NOT NULL
+                )
+            """)
+            
+            # Создание таблицы residents
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS residents (
+                    resident_id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    full_name TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    phone TEXT NOT NULL,
+                    registration_date TIMESTAMP NOT NULL
+                )
+            """)
+            
+            # Остальные таблицы...
+            
+            conn.commit()
+            logger.info("Database tables initialized")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def get_db_connection():
     """Establish database connection using DATABASE_URL."""
@@ -481,20 +522,38 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
-    await send_and_remember(
-        update,
-        context,
-        f"ℹ️ Справка:\n\n• Для срочных проблем используйте слова: 'потоп', 'пожар', 'авария'\n"
-        f"• Новости ЖК: {NEWS_CHANNEL}\n• Техподдержка: @ShiroOni99",
-        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-    )
+    logger.info(f"Showing help for user {update.effective_user.id}")
+    try:
+        await send_and_remember(
+            update,
+            context,
+            f"ℹ️ Справка:\n\n• Для срочных проблем используйте слова: 'потоп', 'пожар', 'авария'\n"
+            f"• Новости ЖК: {NEWS_CHANNEL}\n• Техподдержка: @ShiroOni99",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+    except Exception as e:
+        logger.error(f"Error in show_help: {e}", exc_info=True)
+        raise
 
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's recent requests."""
+    logger.info(f"Showing requests for user {update.effective_user.id}")
     conn = None
     try:
         conn = get_db_connection()
+        logger.info("Database connection established")
         with conn.cursor() as cur:
+            # Проверка существования таблицы
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'residents'
+                )
+            """)
+            if not cur.fetchone()[0]:
+                logger.error("Table 'residents' does not exist")
+                raise Exception("Table 'residents' does not exist")
+
             cur.execute(
                 """
                 SELECT i.issue_id, i.description, i.category, i.status, i.created_at 
@@ -507,6 +566,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 (update.effective_user.id,),
             )
             requests = cur.fetchall()
+            logger.info(f"Found {len(requests)} requests for user")
 
         if not requests:
             await send_and_remember(
@@ -1280,8 +1340,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "new_request":
             await process_new_request(update, context)
         elif query.data == "my_requests":
+            logger.info("My requests button pressed")  # Добавьте это
             await show_user_requests(update, context)
         elif query.data == "help":
+            logger.info("Help button pressed")  # Добавьте это
             await show_help(update, context)
         elif query.data == "active_requests":
             await show_active_requests(update, context)
@@ -1620,6 +1682,8 @@ async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_
 
 def main() -> None:
     """Run the bot with auto-restart."""
+    init_db()
+
     while True:
         try:
             health_server = start_health_server()
