@@ -434,7 +434,7 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             conn.close()
 
-def main_menu_keyboard(user_id, role):
+def main_menu_keyboard(user_id, role, is_in_main_menu=False):
     """Generate main menu keyboard based on user role."""
     keyboard = []
     if role == SUPPORT_ROLES["user"]:
@@ -452,8 +452,9 @@ def main_menu_keyboard(user_id, role):
         keyboard.append([InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")])
         keyboard.append([InlineKeyboardButton("📖 Завершенные заявки", callback_data="completed_requests")])
         keyboard.append([InlineKeyboardButton("🛑 Завершить работу бота", callback_data="shutdown_bot")])
-    keyboard.append([InlineKeyboardButton("🔙 Главное меню", callback_data="start")])
-    return InlineKeyboardMarkup(keyboard)
+    if not is_in_main_menu:
+        keyboard.append([InlineKeyboardButton("🔙 Главное меню", callback_data="start")])
+        return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
@@ -463,7 +464,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update,
         context,
         "🏠 Добро пожаловать в службу поддержки ЖК!",
-        main_menu_keyboard(user_id, role),
+        main_menu_keyboard(user_id, role, is_in_main_menu=True),
     )
 
 async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
