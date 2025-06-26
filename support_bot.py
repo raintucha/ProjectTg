@@ -1039,6 +1039,8 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def generate_pdf_report(start_date, end_date):
     """Generate PDF report."""
+    pdf = FPDF()
+
     conn = None
     try:
         pdf = FPDF()
@@ -1145,11 +1147,12 @@ def generate_pdf_report(start_date, end_date):
 
             pdf.set_xy(start_x, start_y + row_height)
 
-        pdf_output = BytesIO()
-        pdf.output(pdf_output)
-        pdf_output.seek(0)
+        pdf_bytes = BytesIO()
+        pdf_content = pdf.output(dest='S').encode('latin1')  # возвращает строку — нужно преобразовать в байты
+        pdf_bytes.write(pdf_content)
+        pdf_bytes.seek(0)
         logger.info("PDF report generated in memory")
-        return pdf_output
+        return pdf_bytes
     except psycopg2.Error as e:
         logger.error(f"Database error generating PDF: {e}")
         raise Exception(f"Database error: {e}")
@@ -1165,30 +1168,35 @@ async def generate_and_send_report(
 ):
     """Generate and send PDF report."""
     processing_msg = await update.effective_chat.send_message("🔄 Генерация отчета...")
-    pdf_output = None  # Initialize to avoid scope issues
     try:
-        pdf_output = generate_pdf_report(start_date, end_date)
-        pdf_output.seek(0)  # Ensure cursor is at the beginning
-        # Create a named BytesIO object for Telegram
-        pdf_file = BytesIO(pdf_output.read())
+        # Генерируем PDF
+        pdf_bytes = generate_pdf_report(start_date, end_date)
+        
+        # Создаем временный файл в памяти
+        pdf_file = BytesIO()
+        pdf_file.write(pdf_bytes.getvalue())
+        pdf_file.seek(0)
         pdf_file.name = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        
+        # Отправляем документ
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
-            document=pdf_file,  # Use the new BytesIO with name
+            document=pdf_file,
             filename=pdf_file.name,
             caption=f"📊 Отчет за период с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}",
         )
+        
+        # Закрываем файлы
+        pdf_bytes.close()
+        pdf_file.close()
+        
         await processing_msg.delete()
         await start(update, context)
+        
     except Exception as e:
         logger.error(f"Error generating report: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {e}")
-    finally:
-        if pdf_output:
-            pdf_output.close()  # Close the original BytesIO
-        if 'pdf_file' in locals() and pdf_file:
-            pdf_file.close()  # Close the new BytesIO if created
-            
+        await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {str(e)}")
+
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate bot shutdown with confirmation."""
     if not await is_admin(update.effective_user.id):
