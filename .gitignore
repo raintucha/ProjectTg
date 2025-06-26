@@ -6,3 +6,5 @@ __pycache__/
 *.tgz
 media/
 reports/
+dejavu-fonts-ttf-2.37/
+test_db.py
