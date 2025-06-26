@@ -2,9 +2,10 @@ venv/
 __pycache__/
 *.log
 *.pkl
-*.ttf
 *.tgz
 media/
 reports/
 dejavu-fonts-ttf-2.37/
 test_db.py
+*.ttf  # Исключим все .ttf файлы, кроме явно добавленных
+!fonts/DejaVuSans.ttf  # Разрешим включение конкретного файла
