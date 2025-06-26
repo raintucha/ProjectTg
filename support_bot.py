@@ -1165,14 +1165,17 @@ async def generate_and_send_report(
 ):
     """Generate and send PDF report."""
     processing_msg = await update.effective_chat.send_message("🔄 Генерация отчета...")
+    pdf_output = None  # Initialize to avoid scope issues
     try:
         pdf_output = generate_pdf_report(start_date, end_date)
-        pdf_output.seek(0)  # Ensure the cursor is at the beginning
-        pdf_bytes = pdf_output.read()  # Read the BytesIO content as bytes
+        pdf_output.seek(0)  # Ensure cursor is at the beginning
+        # Create a named BytesIO object for Telegram
+        pdf_file = BytesIO(pdf_output.read())
+        pdf_file.name = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
-            document=pdf_bytes,  # Send raw bytes
-            filename=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            document=pdf_file,  # Use the new BytesIO with name
+            filename=pdf_file.name,
             caption=f"📊 Отчет за период с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}",
         )
         await processing_msg.delete()
@@ -1181,8 +1184,11 @@ async def generate_and_send_report(
         logger.error(f"Error generating report: {e}")
         await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {e}")
     finally:
-        pdf_output.close()  # Ensure the BytesIO object is closed
-        
+        if pdf_output:
+            pdf_output.close()  # Close the original BytesIO
+        if 'pdf_file' in locals() and pdf_file:
+            pdf_file.close()  # Close the new BytesIO if created
+            
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate bot shutdown with confirmation."""
     if not await is_admin(update.effective_user.id):
