@@ -452,9 +452,11 @@ def main_menu_keyboard(user_id, role, is_in_main_menu=False):
         keyboard.append([InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")])
         keyboard.append([InlineKeyboardButton("📖 Завершенные заявки", callback_data="completed_requests")])
         keyboard.append([InlineKeyboardButton("🛑 Завершить работу бота", callback_data="shutdown_bot")])
-    if not is_in_main_menu:
-        keyboard.append([InlineKeyboardButton("🔙 Главное меню", callback_data="start")])
-        return InlineKeyboardMarkup(keyboard)
+        btn = InlineKeyboardButton("🔙 Главное меню", callback_data="start")
+    if is_in_main_menu:
+        btn = InlineKeyboardButton("📍 Вы в главном меню", callback_data="do_nothing")
+    keyboard.append([btn])
+    return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
@@ -463,7 +465,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_and_remember(
         update,
         context,
-        "🏠 Добро пожаловать в службу поддержки ЖК!",
+        "🏠 Главное меню службы поддержки ЖК\n\nВыберите действие:",
         main_menu_keyboard(user_id, role, is_in_main_menu=True),
     )
 
@@ -1263,6 +1265,8 @@ async def send_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
     query = update.callback_query
+    if query.data == "do_nothing":
+        return 
     if not query:
         logger.error("No callback query received")
         return
