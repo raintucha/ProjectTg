@@ -1265,18 +1265,24 @@ def generate_pdf_report(start_date, end_date):
             start_x = pdf.get_x()
             pdf.set_y(current_y)
             pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L")
+            max_y = pdf.get_y()  # Get the maximum Y position after the first cell
             pdf.set_xy(start_x + col_widths[0], current_y)
             pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L")
+            max_y = max(max_y, pdf.get_y())
             pdf.set_xy(start_x + col_widths[0] + col_widths[1], current_y)
             pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L")
+            max_y = max(max_y, pdf.get_y())
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2], current_y)
             pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C")
+            max_y = max(max_y, pdf.get_y())
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3], current_y)
             pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C")
+            max_y = max(max_y, pdf.get_y())
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4], current_y)
             pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L")
+            max_y = max(max_y, pdf.get_y())
 
-            current_y += row_height  # Update current Y position for the next row
+            current_y = max_y  # Update current_y to the maximum Y position of the row
 
         pdf_bytes = BytesIO()
         pdf.output(pdf_bytes)
