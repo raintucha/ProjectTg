@@ -1173,7 +1173,7 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
 
 def generate_pdf_report(start_date, end_date):
-    """Generate optimized PDF report with proper formatting"""
+    """Generate PDF report with auto-expanding cells for long text"""
     pdf = FPDF(orientation='L')  # Landscape orientation for more space
     conn = None
     try:
@@ -1186,7 +1186,7 @@ def generate_pdf_report(start_date, end_date):
         # Add regular and bold fonts
         pdf.add_font("DejaVuSans", "", font_path, uni=True)
         pdf.add_font("DejaVuSans", "B", font_path, uni=True)
-        pdf.set_font("DejaVuSans", "", 8)  # Smaller font size
+        pdf.set_font("DejaVuSans", "", 8)
 
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -1204,20 +1204,16 @@ def generate_pdf_report(start_date, end_date):
             )
             issues = cur.fetchall()
 
-        def clean_text(text, max_length=40):
-            """Clean text and truncate with ellipsis if too long"""
+        def clean_text(text):
+            """Clean text preserving Russian characters"""
             if not text:
                 return ""
             try:
-                text = str(text).strip()
-                # Remove special characters but preserve Russian letters
-                text = re.sub(r'[^\w\sА-Яа-яЁё.,-]', '', text)
-                if len(text) > max_length:
-                    return text[:max_length-3] + "..."
-                return text
+                # Remove special characters but preserve Russian and basic punctuation
+                return re.sub(r'[^\w\sА-Яа-яЁё.,-]', '', str(text))
             except Exception as e:
                 logger.error(f"Error cleaning text: {e}")
-                return str(text)[:max_length]
+                return str(text)
 
         # Title page
         pdf.add_page()
@@ -1227,16 +1223,16 @@ def generate_pdf_report(start_date, end_date):
         pdf.cell(0, 8, txt=f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}", ln=1, align="C")
         pdf.ln(10)
 
-        # Table settings - landscape allows wider columns
-        col_widths = [35, 40, 70, 15, 20, 30]  # Total ~210mm in landscape
+        # Table settings
+        col_widths = [35, 40, 70, 15, 20, 30]  # Adjusted column widths
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
-        row_height = 6
-        page_height = 190  # Landscape height
+        line_height = 5
+        page_height = 190  # Landscape mode height
 
         def draw_table_header():
             pdf.set_font("DejaVuSans", "B", 8)
             for width, header in zip(col_widths, headers):
-                pdf.cell(width, 8, txt=header, border=1, align="C")
+                pdf.cell(width, line_height, txt=header, border=1, align="C")
             pdf.ln()
             pdf.set_font("DejaVuSans", "", 8)
 
@@ -1245,30 +1241,54 @@ def generate_pdf_report(start_date, end_date):
         draw_table_header()
 
         for issue in issues:
-            # Clean and format data
+            # Prepare data
             data = [
                 clean_text(issue[0]),  # ФИО
                 clean_text(issue[1]),  # Адрес
-                clean_text(issue[2], 50),  # Описание (longer)
+                clean_text(issue[2]),  # Описание
                 "Сроч" if str(issue[3]).lower() == "urgent" else "Обыч",
                 "выполнено" if str(issue[4]).lower() == "completed" else "новый",
                 clean_text(issue[5])  # Закрыл
             ]
 
-            # Check if new page needed
+            # Calculate required height for this row
+            max_lines = 1
+            for i, text in enumerate(data):
+                if i == 2:  # Описание column - allow more width
+                    lines = len(pdf.multi_cell(col_widths[i], line_height, text, split_only=True))
+                else:
+                    lines = len(text.split('\n'))
+                if lines > max_lines:
+                    max_lines = lines
+
+            row_height = line_height * max_lines
+
+            # Check if we need a new page
             if pdf.get_y() + row_height > page_height:
                 pdf.add_page()
                 draw_table_header()
 
-            # Draw row
-            for width, text in zip(col_widths, data):
-                pdf.cell(width, row_height, txt=text, border=1)
-            pdf.ln()
+            # Save current x position
+            x = pdf.get_x()
+
+            # Draw each cell with calculated height
+            for i, (width, text) in enumerate(zip(col_widths, data)):
+                if i == 2:  # Описание column - multi-line
+                    pdf.multi_cell(width, line_height, txt=text, border=1, align="L")
+                else:
+                    pdf.multi_cell(width, line_height, txt=text, border=1, align="L")
+                
+                # Move to next column position
+                pdf.set_xy(x + width, pdf.get_y() - line_height * (max_lines - 1))
+                x += width
+
+            # Move to next row position
+            pdf.set_xy(pdf.l_margin, pdf.get_y() + line_height * (max_lines - 1))
 
         pdf_bytes = BytesIO()
         pdf.output(pdf_bytes)
         pdf_bytes.seek(0)
-        logger.info("PDF report generated successfully")
+        logger.info("PDF report with auto-height cells generated successfully")
         return pdf_bytes
 
     except psycopg2.Error as e:
@@ -1280,7 +1300,7 @@ def generate_pdf_report(start_date, end_date):
     finally:
         if conn:
             conn.close()
-
+            
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
 ):
