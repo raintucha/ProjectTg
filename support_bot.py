@@ -1173,7 +1173,7 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
 
 def generate_pdf_report(start_date, end_date):
-    """Generate PDF report with optimized layout and pagination for large datasets."""
+    """Generate PDF report with optimized layout, pagination, and complete rows."""
     pdf = FPDF()
     conn = None
     try:
@@ -1205,10 +1205,10 @@ def generate_pdf_report(start_date, end_date):
 
         def clean_text(text):
             try:
-                return text.encode('utf-8', errors='replace').decode('utf-8')[:200]  # Increased to 200 chars
+                return text.encode('utf-8', errors='replace').decode('utf-8')[:150]  # Reduced to 150 chars
             except Exception as e:
                 logger.error(f"Error cleaning text '{text}': {e}")
-                return str(text).encode('ascii', errors='replace').decode('ascii')[:200]
+                return str(text).encode('ascii', errors='replace').decode('ascii')[:150]
 
         # Header on first page
         pdf.cell(200, 10, txt=clean_text("Отчет по заявкам ЖК"), ln=1, align="C")
@@ -1225,8 +1225,8 @@ def generate_pdf_report(start_date, end_date):
         col_widths = [30, 30, 70, 20, 20, 20]  # Total ~190mm
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         base_height = 6
-        margin = 20  # Increased margin to account for header space
-        page_height = 277  # A4 height (297mm) minus margin (20mm)
+        margin = 20
+        page_height = 257  # Reduced to 257mm to account for header and footer space
 
         def draw_table_header():
             for i, header in enumerate(headers):
@@ -1258,33 +1258,26 @@ def generate_pdf_report(start_date, end_date):
             )
             row_height = base_height * max_lines
 
-            # Check if new page is needed
-            if current_y + row_height > page_height:
+            # Check if new page is needed, ensuring the entire row fits
+            if current_y + row_height > page_height or current_y == pdf.get_y():  # Force new page if at top
                 pdf.add_page()
                 draw_table_header()
                 current_y = pdf.get_y()
 
             # Write the row
             pdf.set_xy(start_x, current_y)
-            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L")
-            max_y = pdf.get_y()
+            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L", new_x="RIGHT", new_y="TOP")
             pdf.set_xy(start_x + col_widths[0], current_y)
-            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L")
-            max_y = max(max_y, pdf.get_y())
+            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L", new_x="RIGHT", new_y="TOP")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1], current_y)
-            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L")
-            max_y = max(max_y, pdf.get_y())
+            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L", new_x="RIGHT", new_y="TOP")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2], current_y)
-            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C")
-            max_y = max(max_y, pdf.get_y())
+            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C", new_x="RIGHT", new_y="TOP")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3], current_y)
-            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C")
-            max_y = max(max_y, pdf.get_y())
+            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C", new_x="RIGHT", new_y="TOP")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4], current_y)
-            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L")
-            max_y = max(max_y, pdf.get_y())
-
-            current_y = max_y
+            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L", new_x="RIGHT", new_y="TOP")
+            current_y = pdf.get_y()
 
         pdf_bytes = BytesIO()
         pdf.output(pdf_bytes)
@@ -1301,7 +1294,7 @@ def generate_pdf_report(start_date, end_date):
     finally:
         if conn:
             conn.close()
-            
+
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
 ):
