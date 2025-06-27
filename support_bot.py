@@ -521,9 +521,12 @@ def main_menu_keyboard(user_id, role, is_in_main_menu=False):
         keyboard.append([InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")])
         keyboard.append([InlineKeyboardButton("📖 Завершенные заявки", callback_data="completed_requests")])
         keyboard.append([InlineKeyboardButton("🛑 Завершить работу бота", callback_data="shutdown_bot")])
-        btn = InlineKeyboardButton("🔙 Главное меню", callback_data="start")
+
+    # Set a default button, overriding based on is_in_main_menu
+    btn = InlineKeyboardButton("🔙 Главное меню", callback_data="start")
     if is_in_main_menu:
         btn = InlineKeyboardButton("📍 Вы в главном меню", callback_data="do_nothing")
+
     keyboard.append([btn])
     return InlineKeyboardMarkup(keyboard)
 
