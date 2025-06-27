@@ -568,6 +568,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_name = update.effective_user.full_name or "Unknown"
     username = update.effective_user.username
 
+    role = await get_user_role(chat_id)
+    if role == SUPPORT_ROLES["admin"]:
+        await update.message.reply_text(
+            "🏠 Добро пожаловать, администратор! Используйте меню для управления.",
+            reply_markup=main_menu_keyboard(chat_id, role)
+        )
+        return
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -576,7 +584,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resident = cur.fetchone()
             if resident:
                 resident_id = resident[0]
-                # Insert or update users table
                 cur.execute(
                     """
                     INSERT INTO users (user_id, username, full_name, role, registration_date)
@@ -588,12 +595,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
                 await update.message.reply_text(
                     "🏠 Добро пожаловать обратно, резидент ЖК Сункар! Используйте /new_issue для подачи заявки.",
-                    reply_markup=main_menu_keyboard(chat_id, await get_user_role(chat_id))
+                    reply_markup=main_menu_keyboard(chat_id, role)
                 )
             else:
                 await update.message.reply_text(
                     "❌ Вы не зарегистрированы как резидент. Обратитесь к администратору для добавления.",
-                    reply_markup=main_menu_keyboard(chat_id, await get_user_role(chat_id))
+                    reply_markup=main_menu_keyboard(chat_id, role)
                 )
     except psycopg2.Error as e:
         logger.error(f"Database error in /start: {e.pgerror if hasattr(e, 'pgerror') else str(e)}")
@@ -601,7 +608,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.rollback()
     finally:
         conn.close()
-
+        
 async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
     """Set the user type and show the main menu."""
     user_id = update.effective_user.id
