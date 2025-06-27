@@ -1173,28 +1173,27 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
 
 def generate_pdf_report(start_date, end_date):
-    """Generate properly formatted PDF report"""
-    pdf = FPDF()
+    """Generate optimized PDF report with proper formatting"""
+    pdf = FPDF(orientation='L')  # Landscape orientation for more space
     conn = None
     try:
         # Set up fonts
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found.")
-            raise Exception(f"Font file {font_path} not found.")
+            raise Exception(f"Please download {font_path} to the script directory.")
 
         # Add regular and bold fonts
         pdf.add_font("DejaVuSans", "", font_path, uni=True)
         pdf.add_font("DejaVuSans", "B", font_path, uni=True)
-        pdf.set_font("DejaVuSans", "", 10)
+        pdf.set_font("DejaVuSans", "", 8)  # Smaller font size
 
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT r.full_name, r.address, i.description, 
-                       i.category, i.status, i.created_at, i.completed_at, 
-                       COALESCE(u.full_name, 'Не указан') as closed_by
+                       i.category, i.status, COALESCE(u.full_name, 'Не указан') as closed_by
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 LEFT JOIN users u ON i.closed_by = u.user_id
@@ -1205,38 +1204,41 @@ def generate_pdf_report(start_date, end_date):
             )
             issues = cur.fetchall()
 
-        def clean_text(text):
-            """Clean and truncate text to prevent overflow"""
+        def clean_text(text, max_length=40):
+            """Clean text and truncate with ellipsis if too long"""
             if not text:
                 return ""
             try:
-                # Remove special characters and truncate
-                cleaned = re.sub(r'[^\w\sА-Яа-яЁё.,-]', '', str(text))
-                return cleaned[:50]  # Limit to 50 characters
+                text = str(text).strip()
+                # Remove special characters but preserve Russian letters
+                text = re.sub(r'[^\w\sА-Яа-яЁё.,-]', '', text)
+                if len(text) > max_length:
+                    return text[:max_length-3] + "..."
+                return text
             except Exception as e:
                 logger.error(f"Error cleaning text: {e}")
-                return str(text)[:50]
+                return str(text)[:max_length]
 
         # Title page
         pdf.add_page()
-        pdf.set_font("DejaVuSans", "B", 16)
-        pdf.cell(0, 20, txt="Отчет по заявкам ЖК", ln=1, align="C")
-        pdf.set_font("DejaVuSans", "", 12)
-        pdf.cell(0, 10, txt=f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}", ln=1, align="C")
-        pdf.ln(20)
+        pdf.set_font("DejaVuSans", "B", 14)
+        pdf.cell(0, 10, txt="Отчет по заявкам ЖК", ln=1, align="C")
+        pdf.set_font("DejaVuSans", "", 10)
+        pdf.cell(0, 8, txt=f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}", ln=1, align="C")
+        pdf.ln(10)
 
-        # Table settings
-        col_widths = [30, 30, 60, 15, 20, 25]  # Adjusted widths
+        # Table settings - landscape allows wider columns
+        col_widths = [35, 40, 70, 15, 20, 30]  # Total ~210mm in landscape
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
-        base_height = 6
-        page_height = 250
+        row_height = 6
+        page_height = 190  # Landscape height
 
         def draw_table_header():
-            pdf.set_font("DejaVuSans", "B", 10)
-            for i, header in enumerate(headers):
-                pdf.cell(col_widths[i], 8, txt=header, border=1, align="C")
+            pdf.set_font("DejaVuSans", "B", 8)
+            for width, header in zip(col_widths, headers):
+                pdf.cell(width, 8, txt=header, border=1, align="C")
             pdf.ln()
-            pdf.set_font("DejaVuSans", "", 10)
+            pdf.set_font("DejaVuSans", "", 8)
 
         # Add first table page
         pdf.add_page()
@@ -1244,25 +1246,23 @@ def generate_pdf_report(start_date, end_date):
 
         for issue in issues:
             # Clean and format data
-            full_name = clean_text(issue[0]).replace('\n', ' ')
-            address = clean_text(issue[1]).replace('\n', ' ')
-            description = clean_text(issue[2])
-            category = "Сроч" if str(issue[3]).lower() == "urgent" else "Обыч"
-            status = "выполнено" if str(issue[4]).lower() == "completed" else "новый"
-            closed_by = clean_text(issue[7]).replace('\n', ' ')
+            data = [
+                clean_text(issue[0]),  # ФИО
+                clean_text(issue[1]),  # Адрес
+                clean_text(issue[2], 50),  # Описание (longer)
+                "Сроч" if str(issue[3]).lower() == "urgent" else "Обыч",
+                "выполнено" if str(issue[4]).lower() == "completed" else "новый",
+                clean_text(issue[5])  # Закрыл
+            ]
 
             # Check if new page needed
-            if pdf.get_y() + base_height > page_height:
+            if pdf.get_y() + row_height > page_height:
                 pdf.add_page()
                 draw_table_header()
 
             # Draw row
-            pdf.cell(col_widths[0], base_height, txt=full_name, border=1)
-            pdf.cell(col_widths[1], base_height, txt=address, border=1)
-            pdf.cell(col_widths[2], base_height, txt=description, border=1)
-            pdf.cell(col_widths[3], base_height, txt=category, border=1, align="C")
-            pdf.cell(col_widths[4], base_height, txt=status, border=1, align="C")
-            pdf.cell(col_widths[5], base_height, txt=closed_by, border=1)
+            for width, text in zip(col_widths, data):
+                pdf.cell(width, row_height, txt=text, border=1)
             pdf.ln()
 
         pdf_bytes = BytesIO()
