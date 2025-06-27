@@ -1177,14 +1177,16 @@ def generate_pdf_report(start_date, end_date):
     pdf = FPDF()
     conn = None
     try:
-        # Set up font
+        # Set up fonts
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found. Please place it in the script directory.")
             raise Exception(f"Font file {font_path} not found. Please download DejaVuSans.ttf.")
 
+        # Add regular and bold fonts
         pdf.add_font("DejaVuSans", "", font_path, uni=True)
-        pdf.set_font("DejaVuSans", "", 10)  # Reduced font size for better fit
+        pdf.add_font("DejaVuSans", "B", font_path, uni=True)  # Add bold variant
+        pdf.set_font("DejaVuSans", "", 10)
 
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -1205,7 +1207,7 @@ def generate_pdf_report(start_date, end_date):
 
         def clean_text(text):
             try:
-                return text.encode('utf-8', errors='replace').decode('utf-8')[:100]  # Further reduced to 100 chars
+                return text.encode('utf-8', errors='replace').decode('utf-8')[:100]
             except Exception as e:
                 logger.error(f"Error cleaning text '{text}': {e}")
                 return str(text).encode('ascii', errors='replace').decode('ascii')[:100]
@@ -1219,15 +1221,15 @@ def generate_pdf_report(start_date, end_date):
         pdf.ln(20)
 
         # Table settings
-        col_widths = [25, 30, 65, 15, 20, 25]  # Adjusted column widths
+        col_widths = [25, 30, 65, 15, 20, 25]
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         base_height = 6
-        page_height = 250  # Adjusted page height
+        page_height = 250
 
         def draw_table_header():
             pdf.set_font("DejaVuSans", "B", 10)
             for i, header in enumerate(headers):
-                pdf.cell(col_widths[i], 8, txt=header, border=1, align="C", fill=True)
+                pdf.cell(col_widths[i], 8, txt=header, border=1, align="C")
             pdf.ln()
             pdf.set_font("DejaVuSans", "", 10)
 
@@ -1244,29 +1246,19 @@ def generate_pdf_report(start_date, end_date):
             status = clean_text("выполнено" if issue[4] == "completed" else "новый")
             closed_by = clean_text(issue[7])
 
-            # Calculate required height for this row
+            # Calculate required height
             desc_lines = len(pdf.multi_cell(col_widths[2], base_height, description, split_only=True))
-            max_lines = max(
-                1,  # At least one line
-                len(full_name.split('\n')),
-                len(address.split('\n')),
-                desc_lines,
-                len(category.split('\n')),
-                len(status.split('\n')),
-                len(closed_by.split('\n'))
-            )
+            max_lines = max(1, desc_lines)
             row_height = base_height * max_lines
 
-            # Check if we need a new page
             if current_y + row_height > page_height:
                 pdf.add_page()
                 draw_table_header()
                 current_y = pdf.get_y()
 
-            # Save current x position
             x = pdf.get_x()
-
-            # Draw cells with proper alignment
+            
+            # Draw cells
             pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L", new_x="RIGHT", new_y="TOP")
             pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L", new_x="RIGHT", new_y="TOP")
             pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L", new_x="RIGHT", new_y="TOP")
@@ -1274,7 +1266,6 @@ def generate_pdf_report(start_date, end_date):
             pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C", new_x="RIGHT", new_y="TOP")
             pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L", new_x="RIGHT", new_y="TOP")
             
-            # Update current y position
             current_y = pdf.get_y()
             pdf.set_xy(x, current_y)
 
