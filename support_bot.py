@@ -137,9 +137,9 @@ async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT
                 chat_id=update.effective_chat.id,
                 message_id=context.user_data["last_message_id"],
             )
-            logger.info(f"Deleted previous message ID {context.user_data['last_message_id']}")
+            logger.info(f"Deleted previous message ID {context.user_data['last_message_id']} for user {update.effective_user.id}")
         except Exception as e:
-            logger.warning(f"Failed to delete message: {e}")
+            logger.warning(f"Failed to delete message ID {context.user_data['last_message_id']} for user {update.effective_user.id}: {e}")
         finally:
             context.user_data.pop("last_message_id", None)
 
@@ -160,7 +160,22 @@ async def send_and_remember(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None
 ):
     """Send message and store its ID, deleting previous message."""
-    return await send_message_with_keyboard(update, context, text, reply_markup)
+    logger.info(f"Sending message to user {update.effective_user.id}: {text[:50]}...")
+    await delete_previous_messages(update, context)
+    try:
+        message = await update.effective_chat.send_message(
+            text, reply_markup=reply_markup
+        )
+        context.user_data["last_message_id"] = message.message_id
+        logger.info(f"Message sent, ID {message.message_id} stored for user {update.effective_user.id}")
+        return message
+    except Exception as e:
+        logger.error(f"Error sending message to user {update.effective_user.id}: {e}")
+        await update.effective_chat.send_message(
+            "❌ Ошибка при отправке сообщения. Попробуйте снова.",
+            reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+        raise
 
 async def safe_db_connection(retries=3, delay=2):
     """Try to establish DB connection with retries."""
@@ -512,13 +527,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate new request process."""
+    logger.info(f"User {update.effective_user.id} started new request process")
     await send_and_remember(
         update,
         context,
         "✍️ Опишите вашу проблему:",
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
     )
+    logger.info(f"Prompted user {update.effective_user.id} to describe problem")
     context.user_data["awaiting_problem"] = True
+    logger.info(f"Set awaiting_problem for user {update.effective_user.id}")
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
@@ -540,7 +558,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Ошибка при отображении справки. Попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
-        
+
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's recent requests."""
     logger.info(f"Showing requests for user {update.effective_user.id}")
