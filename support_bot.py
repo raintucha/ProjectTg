@@ -1173,19 +1173,19 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
 
 def generate_pdf_report(start_date, end_date):
-    """Generate PDF report with optimized layout, pagination, and complete rows."""
+    """Generate properly formatted PDF report"""
     pdf = FPDF()
     conn = None
     try:
         # Set up fonts
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
-            logger.error(f"Font file {font_path} not found. Please place it in the script directory.")
-            raise Exception(f"Font file {font_path} not found. Please download DejaVuSans.ttf.")
+            logger.error(f"Font file {font_path} not found.")
+            raise Exception(f"Font file {font_path} not found.")
 
         # Add regular and bold fonts
         pdf.add_font("DejaVuSans", "", font_path, uni=True)
-        pdf.add_font("DejaVuSans", "B", font_path, uni=True)  # Add bold variant
+        pdf.add_font("DejaVuSans", "B", font_path, uni=True)
         pdf.set_font("DejaVuSans", "", 10)
 
         conn = get_db_connection()
@@ -1206,11 +1206,16 @@ def generate_pdf_report(start_date, end_date):
             issues = cur.fetchall()
 
         def clean_text(text):
+            """Clean and truncate text to prevent overflow"""
+            if not text:
+                return ""
             try:
-                return text.encode('utf-8', errors='replace').decode('utf-8')[:100]
+                # Remove special characters and truncate
+                cleaned = re.sub(r'[^\w\sА-Яа-яЁё.,-]', '', str(text))
+                return cleaned[:50]  # Limit to 50 characters
             except Exception as e:
-                logger.error(f"Error cleaning text '{text}': {e}")
-                return str(text).encode('ascii', errors='replace').decode('ascii')[:100]
+                logger.error(f"Error cleaning text: {e}")
+                return str(text)[:50]
 
         # Title page
         pdf.add_page()
@@ -1221,7 +1226,7 @@ def generate_pdf_report(start_date, end_date):
         pdf.ln(20)
 
         # Table settings
-        col_widths = [25, 30, 65, 15, 20, 25]
+        col_widths = [30, 30, 60, 15, 20, 25]  # Adjusted widths
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         base_height = 6
         page_height = 250
@@ -1236,38 +1241,29 @@ def generate_pdf_report(start_date, end_date):
         # Add first table page
         pdf.add_page()
         draw_table_header()
-        current_y = pdf.get_y()
 
         for issue in issues:
-            full_name = clean_text(issue[0])
-            address = clean_text(issue[1])
+            # Clean and format data
+            full_name = clean_text(issue[0]).replace('\n', ' ')
+            address = clean_text(issue[1]).replace('\n', ' ')
             description = clean_text(issue[2])
-            category = clean_text("Сроч" if issue[3] == "urgent" else "Обыч")
-            status = clean_text("выполнено" if issue[4] == "completed" else "новый")
-            closed_by = clean_text(issue[7])
+            category = "Сроч" if str(issue[3]).lower() == "urgent" else "Обыч"
+            status = "выполнено" if str(issue[4]).lower() == "completed" else "новый"
+            closed_by = clean_text(issue[7]).replace('\n', ' ')
 
-            # Calculate required height
-            desc_lines = len(pdf.multi_cell(col_widths[2], base_height, description, split_only=True))
-            max_lines = max(1, desc_lines)
-            row_height = base_height * max_lines
-
-            if current_y + row_height > page_height:
+            # Check if new page needed
+            if pdf.get_y() + base_height > page_height:
                 pdf.add_page()
                 draw_table_header()
-                current_y = pdf.get_y()
 
-            x = pdf.get_x()
-            
-            # Draw cells
-            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L", new_x="RIGHT", new_y="TOP")
-            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L", new_x="RIGHT", new_y="TOP")
-            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L", new_x="RIGHT", new_y="TOP")
-            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C", new_x="RIGHT", new_y="TOP")
-            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C", new_x="RIGHT", new_y="TOP")
-            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L", new_x="RIGHT", new_y="TOP")
-            
-            current_y = pdf.get_y()
-            pdf.set_xy(x, current_y)
+            # Draw row
+            pdf.cell(col_widths[0], base_height, txt=full_name, border=1)
+            pdf.cell(col_widths[1], base_height, txt=address, border=1)
+            pdf.cell(col_widths[2], base_height, txt=description, border=1)
+            pdf.cell(col_widths[3], base_height, txt=category, border=1, align="C")
+            pdf.cell(col_widths[4], base_height, txt=status, border=1, align="C")
+            pdf.cell(col_widths[5], base_height, txt=closed_by, border=1)
+            pdf.ln()
 
         pdf_bytes = BytesIO()
         pdf.output(pdf_bytes)
@@ -1276,7 +1272,7 @@ def generate_pdf_report(start_date, end_date):
         return pdf_bytes
 
     except psycopg2.Error as e:
-        logger.error(f"Database error generating PDF: {e}")
+        logger.error(f"Database error: {e}")
         raise Exception(f"Database error: {e}")
     except Exception as e:
         logger.error(f"Error generating PDF: {e}")
