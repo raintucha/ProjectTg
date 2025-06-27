@@ -540,48 +540,47 @@ def main_menu_keyboard(user_id, role, is_in_main_menu=False, user_type=None):
     keyboard.append([btn])
     return InlineKeyboardMarkup(keyboard)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command."""
-    user_id = update.effective_user.id
-    role = await get_user_role(user_id)
-    
-    # If user already has a type or is an agent/admin, show main menu
-    if context.user_data.get("user_type") or role in [SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]]:
-        await send_and_remember(
-            update,
-            context,
-            "🏠 Добро пожаловать в службу поддержки ЖК Сункар\n\nВыберите действие:",
-            main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=context.user_data.get("user_type")),
-        )
-    else:
-        # Check if user is a resident
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT chat_id FROM residents WHERE chat_id = %s", (user_id,))
-                resident = cur.fetchone()
+from telegram.ext import CommandHandler
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command and register user if they are a resident."""
+    chat_id = update.effective_user.id
+    full_name = update.effective_user.full_name or "Unknown"
+    username = update.effective_user.username
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the user is a resident
+            cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
+            resident = cur.fetchone()
             if resident:
-                context.user_data["user_type"] = USER_TYPES["resident"]
-                await send_and_remember(
-                    update,
-                    context,
-                    "🏠 Добро пожаловать в службу поддержки ЖК Сункар\n\nВыберите действие:",
-                    main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=USER_TYPES["resident"]),
+                resident_id = resident[0]
+                # Insert or update users table
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, registration_date)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    """,
+                    (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                )
+                conn.commit()
+                await update.message.reply_text(
+                    "🏠 Добро пожаловать обратно, резидент ЖК Сункар! Используйте /new_issue для подачи заявки.",
+                    reply_markup=main_menu_keyboard(chat_id, await get_user_role(chat_id))
                 )
             else:
-                # Prompt user to select their type
-                keyboard = [
-                    [InlineKeyboardButton("🏠 Я житель", callback_data="select_resident")],
-                    [InlineKeyboardButton("🔍 Я потенциальный покупатель", callback_data="select_potential_buyer")],
-                ]
-                await send_and_remember(
-                    update,
-                    context,
-                    "🏠 Добро пожаловать в службу поддержки ЖК Сункар\n\nПожалуйста, выберите, кто вы:",
-                    InlineKeyboardMarkup(keyboard),
+                await update.message.reply_text(
+                    "❌ Вы не зарегистрированы как резидент. Обратитесь к администратору для добавления.",
+                    reply_markup=main_menu_keyboard(chat_id, await get_user_role(chat_id))
                 )
-        finally:
-            conn.close()
+    except psycopg2.Error as e:
+        logger.error(f"Database error in /start: {e.pgerror if hasattr(e, 'pgerror') else str(e)}")
+        await update.message.reply_text("❌ Ошибка базы данных. Попробуйте позже.")
+        conn.rollback()
+    finally:
+        conn.close()
 
 async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
     """Set the user type and show the main menu."""
@@ -597,16 +596,42 @@ async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
 async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate new request process."""
-    logger.info(f"User {update.effective_user.id} started new request process")
+    chat_id = update.effective_user.id
+    full_name = update.effective_user.full_name or "Unknown"
+    username = update.effective_user.username
+    logger.info(f"User {chat_id} started new request process")
+
+    # Check and register user in users table if missing
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (chat_id,))
+            if not cur.fetchone():
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, registration_date)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    """,
+                    (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                )
+                conn.commit()
+                logger.info(f"Auto-registered user {chat_id} in users table")
+    except psycopg2.Error as e:
+        logger.error(f"Database error in process_new_request: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
     await send_and_remember(
         update,
         context,
         "✍️ Опишите вашу проблему:",
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
     )
-    logger.info(f"Prompted user {update.effective_user.id} to describe problem")
+    logger.info(f"Prompted user {chat_id} to describe problem")
     context.user_data["awaiting_problem"] = True
-    logger.info(f"Set awaiting_problem for user {update.effective_user.id}")
+    logger.info(f"Set awaiting_problem for user {chat_id}")
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
@@ -732,6 +757,31 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["is_urgent"] = is_urgent
     logger.info(f"Urgency detected: {is_urgent}")
     
+    # Check and register user in users table if missing
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (update.effective_user.id,))
+            if not cur.fetchone():
+                username = update.effective_user.username
+                full_name = update.effective_user.full_name or "Unknown"
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, registration_date)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    """,
+                    (update.effective_user.id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                )
+                conn.commit()
+                logger.info(f"Auto-registered user {update.effective_user.id} in users table")
+    except psycopg2.Error as e:
+        logger.error(f"Database error in process_problem_report: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+    # Proceed with resident check
     conn = None
     try:
         conn = get_db_connection()
@@ -744,39 +794,15 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             )
             resident = cur.fetchone()
             logger.info(f"Resident found: {resident is not None}")
-
-        if resident:
-            issue_id = await save_request_to_db(update, context, resident[0])
-            logger.info(f"Saved issue ID {issue_id} for existing resident")
-            await send_and_remember(
-                update,
-                context,
-                f"✅ Ваша заявка сохранена!\nНомер заявки: #{issue_id}\nНажмите '🔙 Главное меню' для продолжения.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-            )
-            if context.user_data["is_urgent"]:
-                await send_urgent_alert(update, context, issue_id)
-            return
-
-        await send_and_remember(
-            update,
-            context,
-            "📝 Для регистрации введите ваше ФИО:",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
-        )
-        logger.info(f"Prompted user {update.effective_user.id} for name")
-        context.user_data.pop("awaiting_problem", None)
-        context.user_data["awaiting_name"] = True
-        logger.info(f"Set awaiting_name for user {update.effective_user.id}")
-        
     except psycopg2.Error as e:
-        logger.error(f"Database error in process_problem_report for {update.effective_user.id}: {e}")
+        logger.error(f"Database error in resident check: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка базы данных. Пожалуйста, попробуйте позже.",
+            "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
+        return
     finally:
         if conn:
             logger.info("Closing database connection")
@@ -785,10 +811,27 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
 async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, resident_id: int):
     logger.info(f"Attempting to save request. Resident ID: {resident_id}")
     logger.info(f"Context data: {context.user_data}")
+    user_id = update.effective_user.id
     
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
+            # Ensure user exists in users table
+            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+            if not cur.fetchone():
+                username = update.effective_user.username
+                full_name = update.effective_user.full_name or "Unknown"
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, registration_date)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    """,
+                    (user_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                )
+                conn.commit()
+                logger.info(f"Auto-registered user {user_id} in users table")
+
             cur.execute("SELECT 1 FROM residents WHERE resident_id = %s", (resident_id,))
             if not cur.fetchone():
                 logger.error(f"Resident {resident_id} not found in database")
@@ -812,9 +855,18 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             )
             issue_id = cur.fetchone()[0]
+
+            # Log the issue creation
+            cur.execute(
+                """
+                INSERT INTO issue_logs (issue_id, action, user_id, action_time)
+                VALUES (%s, 'create', %s, NOW())
+                """,
+                (issue_id, user_id)
+            )
             conn.commit()
             
-            logger.info(f"Successfully saved issue #{issue_id}")
+            logger.info(f"Successfully saved issue #{issue_id} with log")
             return issue_id
             
     except psycopg2.IntegrityError as e:
@@ -2313,6 +2365,8 @@ async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_
         InlineKeyboardMarkup(keyboard),
     )
 
+# Remove the standalone application.add_handler line
+# Update the main() function (near the end of the file) as follows:
 def main() -> None:
     """Run the bot with auto-restart."""
     init_db()
@@ -2323,6 +2377,7 @@ def main() -> None:
             logger.info("🔄 Initializing bot...")
             application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+            # Add all handlers here
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
