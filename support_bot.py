@@ -1867,7 +1867,7 @@ async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete resident from database and clear user_type, handling foreign key constraints and completed issues."""
+    """Delete resident from database and clear user_type, handling foreign key constraints and completed issues with enhanced logging."""
     if "awaiting_resident_id_delete" not in context.user_data:
         await send_and_remember(
             update,
@@ -1905,6 +1905,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             # Check for associated issues (exclude completed ones)
             cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s AND status != 'completed'", (resident_id,))
             issue_count = cur.fetchone()[0]
+            logger.info(f"Found {issue_count} non-completed issues for resident_id {resident_id}")
             if issue_count > 0:
                 await send_and_remember(
                     update,
@@ -1914,7 +1915,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
                 )
                 return
 
-            # Delete from residents table
+            # Attempt deletion
             cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
             # Optionally delete from users table
             cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", (chat_id, SUPPORT_ROLES["user"]))
@@ -1930,20 +1931,30 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             )
     except psycopg2.Error as e:
         logger.error(f"Database error deleting resident (chat_id={chat_id}, resident_id={resident_id}): {e}")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка базы данных. Попробуйте позже.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
-        )
+        # Fallback: Check if issues exist despite status
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
+            total_issues = cur.fetchone()[0]
+            if total_issues > 0:
+                await send_and_remember(
+                    update,
+                    context,
+                    f"❌ Нельзя удалить резидента {full_name} (chat ID: {chat_id}). Есть {total_issues} связанных заявок (включая завершенные). Очистите их вручную или обратитесь к администратору.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+                )
+            else:
+                await send_and_remember(
+                    update,
+                    context,
+                    "❌ Ошибка базы данных. Попробуйте позже.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+                )
         conn.rollback()
     finally:
-        # Clear all conflicting states
         context.user_data.pop("awaiting_resident_id_delete", None)
-        context.user_data.pop("awaiting_resident_id_add", None)  # Clear any add state
+        context.user_data.pop("awaiting_resident_id_add", None)
         conn.close()
-
-
+        
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
     user_id = update.effective_user.id
