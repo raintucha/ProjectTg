@@ -1892,20 +1892,25 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
 
             resident_id, full_name = resident
 
-            # 2. Проверяем и логируем количество связанных заявок перед удалением
+            # 2. Проверяем количество связанных заявок и логов перед удалением
             cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
             issue_count_before = cur.fetchone()[0]
-            logger.info(f"Найдено {issue_count_before} заявок для resident_id {resident_id} перед удалением")
+            cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
+            log_count_before = cur.fetchone()[0]
+            logger.info(f"Найдено {issue_count_before} заявок и {log_count_before} логов для resident_id {resident_id} перед удалением")
 
-            # 3. Удаляем резидента (каскадное удаление обработает issues)
+            # 3. Удаляем резидента (каскадное удаление обработает issues и issue_logs)
             cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
             conn.commit()
 
-            # 4. Проверяем количество удалённых записей
+            # 4. Проверяем количество оставшихся записей после каскада
             cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
             issue_count_after = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
+            log_count_after = cur.fetchone()[0]
             issues_deleted = issue_count_before - issue_count_after
-            logger.info(f"Удалено {issues_deleted} заявок каскадно для resident_id {resident_id}")
+            logs_deleted = log_count_before - log_count_after
+            logger.info(f"Удалено {issues_deleted} заявок и {logs_deleted} логов каскадно для resident_id {resident_id}")
 
             # 5. Пытаемся удалить из users (необязательно)
             try:
@@ -1919,7 +1924,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             # Успешное сообщение с информацией о каскадном удалении
             await update.message.reply_text(
                 f"✅ Резидент {full_name} (ID: {chat_id}) успешно удалён.\n"
-                f"Удалено заявок: {issues_deleted}",
+                f"Удалено заявок: {issues_deleted}, логов: {logs_deleted}",
                 reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
             )
 
