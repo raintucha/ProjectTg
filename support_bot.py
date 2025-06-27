@@ -132,17 +132,21 @@ async def is_agent(user_id: int) -> bool:
 
 async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Delete previous bot messages if they exist."""
-    if "last_message_id" in context.user_data:
-        try:
-            await context.bot.delete_message(
-                chat_id=update.effective_chat.id,
-                message_id=context.user_data["last_message_id"],
-            )
-            logger.info(f"Deleted previous message ID {context.user_data['last_message_id']} for user {update.effective_user.id}")
-        except Exception as e:
-            logger.warning(f"Failed to delete message ID {context.user_data['last_message_id']} for user {update.effective_user.id}: {e}")
-        finally:
-            context.user_data.pop("last_message_id", None)
+    if "last_message_id" not in context.user_data:
+        return
+
+    try:
+        await context.bot.delete_message(
+            chat_id=update.effective_chat.id,
+            message_id=context.user_data["last_message_id"],
+        )
+    except telegram.error.BadRequest as e:
+        if "message to delete not found" in str(e):
+            logger.warning(f"Message {context.user_data['last_message_id']} already deleted")
+        else:
+            logger.error(f"Failed to delete message: {e}")
+    finally:
+        context.user_data.pop("last_message_id", None)
 
 async def send_message_with_keyboard(update, context, text, keyboard):
     """Send a message with a keyboard and store its ID, deleting previous message."""
@@ -1867,15 +1871,7 @@ async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete resident from database and clear user_type, handling foreign key constraints with issue cleanup."""
-    if "awaiting_resident_id_delete" not in context.user_data:
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка: не ожидается ввод chat ID.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
-        )
-        return
+    """Удаление резидента с обработкой случаев, когда его нет в users"""
     try:
         chat_id = int(update.message.text)
     except ValueError:
@@ -1886,67 +1882,68 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
         )
         return
-    conn = get_db_connection()
+
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
-            # Find resident_id based on chat_id
+            # Проверяем существование резидента
             cur.execute("SELECT resident_id, full_name FROM residents WHERE chat_id = %s", (chat_id,))
             resident = cur.fetchone()
+            
             if not resident:
                 await send_and_remember(
                     update,
                     context,
                     f"❌ Резидент с chat ID {chat_id} не найден.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
                 )
                 return
+
             resident_id, full_name = resident
 
-            # Check for associated issues
-            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s AND status != 'completed'", (resident_id,))
-            issue_count = cur.fetchone()[0]
-            logger.info(f"Found {issue_count} non-completed issues for resident_id {resident_id}")
-            if issue_count > 0:
-                await send_and_remember(
-                    update,
-                    context,
-                    f"❌ Нельзя удалить резидента {full_name} (chat ID: {chat_id}). Есть {issue_count} незавершенных связанных заявок. Удалите или переприсвойте их сначала.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
-                )
-                return
-
-            # Cleanup completed issues before deletion
+            # Удаляем связанные заявки (если есть)
             cur.execute("DELETE FROM issues WHERE resident_id = %s", (resident_id,))
-            logger.info(f"Deleted {cur.rowcount} completed issues for resident_id {resident_id}")
-
-            # Delete from residents table
+            
+            # Удаляем из residents
             cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
-            # Optionally delete from users table
-            cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", (chat_id, SUPPORT_ROLES["user"]))
+            
+            # Пытаемся удалить из users (если есть), но не обязательно
+            cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", 
+                       (chat_id, SUPPORT_ROLES["user"]))
+            
             conn.commit()
-            # Clear user_type if the deleted user is the current user
-            if chat_id == update.effective_user.id:
-                context.user_data.pop("user_type", None)
-            await send_and_remember(
-                update,
-                context,
-                f"✅ Резидент {full_name} (chat ID: {chat_id}) удален.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
-            )
-    except psycopg2.Error as e:
-        logger.error(f"Database error deleting resident (chat_id={chat_id}, resident_id={resident_id}): {e}")
+
         await send_and_remember(
             update,
             context,
-            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в техподдержку.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+            f"✅ Резидент {full_name} (chat ID: {chat_id}) успешно удалён.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
-        conn.rollback()
-    finally:
-        context.user_data.pop("awaiting_resident_id_delete", None)
-        context.user_data.pop("awaiting_resident_id_add", None)
-        conn.close()
 
+    except psycopg2.Error as e:
+        logger.error(f"Database error deleting resident: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка базы данных при удалении.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        if conn:
+            conn.rollback()
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Непредвиденная ошибка.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+    finally:
+        if conn:
+            conn.close()
+        context.user_data.pop("awaiting_resident_id_delete", None)
+        
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
     user_id = update.effective_user.id
