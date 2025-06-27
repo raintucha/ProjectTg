@@ -608,7 +608,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.rollback()
     finally:
         conn.close()
-        
+
 async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
     """Set the user type and show the main menu."""
     user_id = update.effective_user.id
@@ -650,16 +650,53 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     finally:
         conn.close()
 
-    await send_and_remember(
-        update,
-        context,
-        "✍️ Опишите вашу проблему:",
-        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-    )
-    logger.info(f"Prompted user {chat_id} to describe problem")
-    context.user_data["awaiting_problem"] = True
-    logger.info(f"Set awaiting_problem for user {chat_id}")
-
+    role = await get_user_role(chat_id)
+    if role == SUPPORT_ROLES["admin"]:
+        # For admins, skip resident check and prompt directly for problem description
+        await send_and_remember(
+            update,
+            context,
+            "✍️ Опишите вашу проблему (для админа):",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        context.user_data["awaiting_problem"] = True
+    else:
+        # For non-admins, proceed with resident check flow
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
+                resident = cur.fetchone()
+                if resident:
+                    await send_and_remember(
+                        update,
+                        context,
+                        "✍️ Опишите вашу проблему:",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+                    )
+                    context.user_data["awaiting_problem"] = True
+                else:
+                    context.user_data["awaiting_name"] = True
+                    await send_and_remember(
+                        update,
+                        context,
+                        "👤 Введите ваше ФИО:",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+                    )
+        except psycopg2.Error as e:
+            logger.error(f"Database error in resident check: {e}")
+            await send_and_remember(
+                update,
+                context,
+                "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
+                main_menu_keyboard(chat_id, role)
+            )
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                conn.close()
+                
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
     logger.info(f"Showing help for user {update.effective_user.id}")
@@ -808,54 +845,70 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         conn.close()
 
-    # Proceed with resident check and registration
-    conn = None
-    try:
-        conn = get_db_connection()
-        logger.info(f"Connected to database for user {update.effective_user.id}")
-        with conn.cursor() as cur:
-            logger.info(f"Checking resident for chat_id {update.effective_user.id}")
-            cur.execute(
-                "SELECT resident_id FROM residents WHERE chat_id = %s",
-                (update.effective_user.id,)
-            )
-            resident = cur.fetchone()
-            if resident:
-                resident_id = resident[0]
-                issue_id = await save_request_to_db(update, context, resident_id)
-                if context.user_data["is_urgent"]:
-                    await send_urgent_alert(update, context, issue_id)
-                await send_and_remember(
-                    update,
-                    context,
-                    "✅ Заявка принята!\n\n"
-                    f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
-                    f"Номер заявки: #{issue_id}",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-                )
-                context.user_data.clear()
-            else:
-                context.user_data["awaiting_name"] = True
-                await send_and_remember(
-                    update,
-                    context,
-                    "👤 Введите ваше ФИО:",
-                    InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-                )
-    except psycopg2.Error as e:
-        logger.error(f"Database error in resident check: {e}")
+    role = await get_user_role(update.effective_user.id)
+    if role == SUPPORT_ROLES["admin"]:
+        # For admins, bypass resident check and save request directly
+        issue_id = await save_request_to_db(update, context, None)  # Use None or a default resident_id if needed
+        if context.user_data["is_urgent"]:
+            await send_urgent_alert(update, context, issue_id)
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+            "✅ Заявка принята!\n\n"
+            f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
+            f"Номер заявки: #{issue_id}",
+            main_menu_keyboard(update.effective_user.id, role),
         )
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            logger.info("Closing database connection")
-            conn.close()
+        context.user_data.clear()
+    else:
+        # Proceed with resident check for non-admins
+        conn = None
+        try:
+            conn = get_db_connection()
+            logger.info(f"Connected to database for user {update.effective_user.id}")
+            with conn.cursor() as cur:
+                logger.info(f"Checking resident for chat_id {update.effective_user.id}")
+                cur.execute(
+                    "SELECT resident_id FROM residents WHERE chat_id = %s",
+                    (update.effective_user.id,)
+                )
+                resident = cur.fetchone()
+                if resident:
+                    resident_id = resident[0]
+                    issue_id = await save_request_to_db(update, context, resident_id)
+                    if context.user_data["is_urgent"]:
+                        await send_urgent_alert(update, context, issue_id)
+                    await send_and_remember(
+                        update,
+                        context,
+                        "✅ Заявка принята!\n\n"
+                        f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
+                        f"Номер заявки: #{issue_id}",
+                        main_menu_keyboard(update.effective_user.id, role),
+                    )
+                    context.user_data.clear()
+                else:
+                    context.user_data["awaiting_name"] = True
+                    await send_and_remember(
+                        update,
+                        context,
+                        "👤 Введите ваше ФИО:",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+                    )
+        except psycopg2.Error as e:
+            logger.error(f"Database error in resident check: {e}")
+            await send_and_remember(
+                update,
+                context,
+                "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
+                main_menu_keyboard(update.effective_user.id, role)
+            )
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                logger.info("Closing database connection")
+                conn.close()
 
 async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, resident_id: int):
     logger.info(f"Attempting to save request. Resident ID: {resident_id}")
