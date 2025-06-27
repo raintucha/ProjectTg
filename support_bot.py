@@ -1175,17 +1175,14 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
 def generate_pdf_report(start_date, end_date):
     """Generate PDF report."""
     pdf = FPDF()
-
     conn = None
     try:
-        pdf = FPDF()
         pdf.add_page()
-        
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found. Please place it in the script directory.")
             raise Exception(f"Font file {font_path} not found. Please download DejaVuSans.ttf.")
-        
+
         pdf.add_font("DejaVuSans", "", font_path, uni=True)
         pdf.set_font("DejaVuSans", "", 12)
 
@@ -1208,10 +1205,10 @@ def generate_pdf_report(start_date, end_date):
 
         def clean_text(text):
             try:
-                return text.encode('utf-8', errors='replace').decode('utf-8')
+                return text.encode('utf-8', errors='replace').decode('utf-8')[:100]  # Limit to 100 chars
             except Exception as e:
                 logger.error(f"Error cleaning text '{text}': {e}")
-                return str(text).encode('ascii', errors='replace').decode('ascii')
+                return str(text).encode('ascii', errors='replace').decode('ascii')[:100]
 
         pdf.cell(200, 10, txt=clean_text("Отчет по заявкам ЖК"), ln=1, align="C")
         pdf.cell(
@@ -1223,27 +1220,18 @@ def generate_pdf_report(start_date, end_date):
         )
         pdf.ln(10)
 
-        col_widths = [40, 40, 60, 25, 25, 30]
-        for issue in issues:
-            col_widths[0] = max(col_widths[0], len(clean_text(issue[0])) * 2.5)
-            col_widths[1] = max(col_widths[1], len(clean_text(issue[1])) * 2.5)
-            col_widths[2] = max(col_widths[2], len(clean_text(issue[2])) * 2.5)
-            col_widths[3] = max(col_widths[3], len(clean_text("Сроч" if issue[3] == "urgent" else "Обыч")) * 2.5)
-            col_widths[4] = max(col_widths[4], len(clean_text(issue[4])) * 2.5)
-            col_widths[5] = max(col_widths[5], len(clean_text(issue[7])) * 2.5)
-
-        total_width = sum(col_widths)
-        if total_width > 190:
-            scale_factor = 190 / total_width
-            col_widths = [w * scale_factor for w in col_widths]
-
-        pdf.set_font("DejaVuSans", size=10)
+        # Define column widths (adjust based on content)
+        col_widths = [35, 35, 80, 20, 20, 30]  # Total ~200mm (A4 width)
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         for i, header in enumerate(headers):
-            pdf.cell(col_widths[i], 8, clean_text(header), border=1, align="C")
+            pdf.cell(col_widths[i], 8, txt=clean_text(header), border=1, align="C")
         pdf.ln()
 
-        base_height = 5
+        # Set base height and margin
+        base_height = 6
+        margin = 10
+        current_y = pdf.get_y()
+
         for issue in issues:
             full_name = clean_text(issue[0])
             address = clean_text(issue[1])
@@ -1252,42 +1240,46 @@ def generate_pdf_report(start_date, end_date):
             status = clean_text(issue[4])
             closed_by = clean_text(issue[7])
 
-            def get_line_count(text, width):
-                return max(1, int(len(text) * pdf.font_size / (width / 2.5)))
-
-            max_lines = max(
-                get_line_count(full_name, col_widths[0]),
-                get_line_count(address, col_widths[1]),
-                get_line_count(description, col_widths[2]),
-                get_line_count(category, col_widths[3]),
-                get_line_count(status, col_widths[4]),
-                get_line_count(closed_by, col_widths[5])
+            # Check if adding this row exceeds page height
+            row_height = base_height * max(
+                len(full_name.split('\n')),
+                len(address.split('\n')),
+                len(description.split('\n')),
+                len(category.split('\n')),
+                len(status.split('\n')),
+                len(closed_by.split('\n'))
             )
-            row_height = base_height * max_lines
+            if current_y + row_height > pdf.h - margin:  # h is page height (e.g., 297mm for A4)
+                pdf.add_page()
+                current_y = margin
+                # Redraw headers on new page
+                for i, header in enumerate(headers):
+                    pdf.cell(col_widths[i], 8, txt=clean_text(header), border=1, align="C")
+                pdf.ln()
+                current_y += 8
 
+            # Write the row
             start_x = pdf.get_x()
-            start_y = pdf.get_y()
+            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L", ln=3)
+            pdf.set_xy(start_x + col_widths[0], current_y)
+            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L", ln=3)
+            pdf.set_xy(start_x + col_widths[0] + col_widths[1], current_y)
+            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L", ln=3)
+            pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2], current_y)
+            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C", ln=3)
+            pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3], current_y)
+            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C", ln=3)
+            pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4], current_y)
+            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L", ln=3)
 
-            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L")
-            pdf.set_xy(start_x + col_widths[0], start_y)
-            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L")
-            pdf.set_xy(start_x + col_widths[0] + col_widths[1], start_y)
-            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L")
-            pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2], start_y)
-            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C")
-            pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3], start_y)
-            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C")
-            pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4], start_y)
-            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L")
-
-            pdf.set_xy(start_x, start_y + row_height)
+            current_y += row_height  # Update current Y position for the next row
 
         pdf_bytes = BytesIO()
-        pdf_content = pdf.output(dest='S').encode('latin1')  # возвращает строку — нужно преобразовать в байты
-        pdf_bytes.write(pdf_content)
+        pdf.output(pdf_bytes)
         pdf_bytes.seek(0)
         logger.info("PDF report generated in memory")
         return pdf_bytes
+
     except psycopg2.Error as e:
         logger.error(f"Database error generating PDF: {e}")
         raise Exception(f"Database error: {e}")
