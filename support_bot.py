@@ -637,11 +637,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if resident:
                 resident_id = resident[0]
+                # Update user info if needed
                 cur.execute(
                     """
                     INSERT INTO users (user_id, username, full_name, role, registration_date)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
                     """,
                     (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
                 )
@@ -651,9 +652,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=main_menu_keyboard(chat_id, role, is_in_main_menu=True)
                 )
             else:
+                # Если резидент не найден, предлагаем зарегистрироваться
+                keyboard = [
+                    [InlineKeyboardButton("📝 Зарегистрироваться как резидент", callback_data="register_as_resident")],
+                    [InlineKeyboardButton("ℹ️ Я потенциальный покупатель", callback_data="select_potential_buyer")]
+                ]
                 await update.message.reply_text(
-                    "❌ Вы не зарегистрированы как резидент.",
-                    reply_markup=main_menu_keyboard(chat_id, role)
+                    "👋 Добро пожаловать! Выберите ваш статус:",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
     except psycopg2.Error as e:
         logger.error(f"Database error in /start: {e}")
@@ -663,6 +669,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.rollback()
     finally:
         conn.close()
+
+async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start resident registration process."""
+    await send_and_remember(
+        update,
+        context,
+        "👤 Введите ваше ФИО для регистрации:",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
+    )
+    context.user_data["awaiting_name"] = True
+    context.user_data["registration_flow"] = True  # Mark as registration flow
 
 async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
     """Set the user type and show the main menu."""
@@ -682,6 +699,19 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     full_name = update.effective_user.full_name or "Unknown"
     username = update.effective_user.username
     logger.info(f"User {chat_id} started new request process")
+
+    # Check if we're in registration flow
+    if context.user_data.get("registration_flow"):
+        await send_and_remember(
+            update,
+            context,
+            "✍️ Опишите вашу проблему:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        context.user_data["awaiting_problem"] = True
+        return
+
+    # Rest of your existing code...
 
     # Check and register user in users table if missing
     conn = get_db_connection()
@@ -870,11 +900,26 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     """Process problem description."""
     problem_text = update.message.text
     logger.info(f"User {update.effective_user.id} entered problem: {problem_text}")
+    
+    # Сохраняем проблему и срочность
     context.user_data["problem_text"] = problem_text
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
-    is_urgent = any(keyword in problem_text.lower() for keyword in urgent_keywords)
-    context.user_data["is_urgent"] = is_urgent
-    logger.info(f"Urgency detected: {is_urgent}")
+    context.user_data["is_urgent"] = any(keyword in problem_text.lower() for keyword in urgent_keywords)
+    
+    # Проверяем, есть ли все необходимые данные
+    required_fields = ['user_name', 'user_address', 'problem_text', 'is_urgent']
+    if not all(field in context.user_data for field in required_fields):
+        missing = [field for field in required_fields if field not in context.user_data]
+        logger.error(f"Missing fields: {missing}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Не все данные заполнены. Пожалуйста, начните процесс заново.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        return
+    
+    # Продолжаем обработку...
     
     # Check and register user in users table if missing
     conn = get_db_connection()
