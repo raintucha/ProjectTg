@@ -531,10 +531,16 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Новости ЖК: {NEWS_CHANNEL}\n• Техподдержка: @ShiroOni99",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
+        logger.info(f"Help message sent to user {update.effective_user.id}")
     except Exception as e:
-        logger.error(f"Error in show_help: {e}", exc_info=True)
-        raise
-
+        logger.error(f"Error in show_help for user {update.effective_user.id}: {e}", exc_info=True)
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка при отображении справки. Попробуйте позже.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's recent requests."""
     logger.info(f"Showing requests for user {update.effective_user.id}")
@@ -631,23 +637,29 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process problem description."""
     problem_text = update.message.text
+    logger.info(f"User {update.effective_user.id} entered problem: {problem_text}")
     context.user_data["problem_text"] = problem_text
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
     is_urgent = any(keyword in problem_text.lower() for keyword in urgent_keywords)
     context.user_data["is_urgent"] = is_urgent
+    logger.info(f"Urgency detected: {is_urgent}")
     
     conn = None
     try:
         conn = get_db_connection()
+        logger.info(f"Connected to database for user {update.effective_user.id}")
         with conn.cursor() as cur:
+            logger.info(f"Checking resident for chat_id {update.effective_user.id}")
             cur.execute(
                 "SELECT resident_id FROM residents WHERE chat_id = %s",
                 (update.effective_user.id,)
             )
             resident = cur.fetchone()
+            logger.info(f"Resident found: {resident is not None}")
 
         if resident:
             issue_id = await save_request_to_db(update, context, resident[0])
+            logger.info(f"Saved issue ID {issue_id} for existing resident")
             await send_and_remember(
                 update,
                 context,
@@ -664,11 +676,13 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             "📝 Для регистрации введите ваше ФИО:",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
         )
+        logger.info(f"Prompted user {update.effective_user.id} for name")
         context.user_data.pop("awaiting_problem", None)
         context.user_data["awaiting_name"] = True
+        logger.info(f"Set awaiting_name for user {update.effective_user.id}")
         
     except psycopg2.Error as e:
-        logger.error(f"Database error in process_problem_report: {e}")
+        logger.error(f"Database error in process_problem_report for {update.effective_user.id}: {e}")
         await send_and_remember(
             update,
             context,
@@ -677,6 +691,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         )
     finally:
         if conn:
+            logger.info("Closing database connection")
             conn.close()
 
 async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, resident_id: int):
@@ -1616,23 +1631,39 @@ async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages based on context."""
+    logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
     if "awaiting_problem" in context.user_data:
+        logger.info(f"Processing problem report for user {update.effective_user.id}")
         await process_problem_report(update, context)
     elif "awaiting_name" in context.user_data:
+        logger.info(f"Processing name for user {update.effective_user.id}")
         await process_user_name(update, context)
     elif "awaiting_address" in context.user_data:
+        logger.info(f"Processing address for user {update.effective_user.id}")
         await process_user_address(update, context)
     elif "awaiting_phone" in context.user_data:
+        logger.info(f"Processing phone for user {update.effective_user.id}")
         await process_user_phone(update, context)
     elif "awaiting_solution" in context.user_data:
+        logger.info(f"Processing solution for user {update.effective_user.id}")
         await save_solution(update, context)
     elif "awaiting_agent_id" in context.user_data:
+        logger.info(f"Processing agent ID for user {update.effective_user.id}")
         await process_new_agent(update, context)
     elif "awaiting_agent_name" in context.user_data:
+        logger.info(f"Processing agent name for user {update.effective_user.id}")
         await save_agent(update, context)
     elif "awaiting_user_message" in context.user_data:
+        logger.info(f"Processing user message for user {update.effective_user.id}")
         await send_user_message(update, context)
-
+    else:
+        logger.warning(f"No awaiting state for user {update.effective_user.id}")
+        await send_and_remember(
+            update,
+            context,
+            "⚠️ Неизвестная команда. Используйте кнопки меню.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     error = context.error
