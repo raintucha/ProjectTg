@@ -1187,7 +1187,7 @@ def generate_pdf_report(start_date, end_date):
     pdf = FPDF()
     conn = None
     try:
-        # Set up fonts
+        # Подключение шрифта
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found.")
@@ -1197,6 +1197,7 @@ def generate_pdf_report(start_date, end_date):
         pdf.add_font("DejaVuSans", "B", font_path, uni=True)
         pdf.set_font("DejaVuSans", "", 10)
 
+        # Подключение к базе
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
@@ -1213,8 +1214,8 @@ def generate_pdf_report(start_date, end_date):
             )
             issues = cur.fetchall()
 
-        def clean_text(text, max_length=100):
-            """Clean and truncate text"""
+        def clean_text(text, max_length=300):
+            """Очистка текста"""
             if not text:
                 return ""
             try:
@@ -1225,7 +1226,7 @@ def generate_pdf_report(start_date, end_date):
                 logger.error(f"Error cleaning text: {e}")
                 return str(text)[:max_length]
 
-        # Title page
+        # Заголовок
         pdf.add_page()
         pdf.set_font("DejaVuSans", "B", 16)
         pdf.cell(0, 10, txt="Отчет по заявкам ЖК", ln=1, align="C")
@@ -1233,21 +1234,24 @@ def generate_pdf_report(start_date, end_date):
         pdf.cell(0, 10, txt=f"Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}", ln=1, align="C")
         pdf.ln(10)
 
-        # Table settings
+        # Параметры таблицы
         col_widths = [35, 35, 60, 20, 25, 30]
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         line_height = 6
-        page_height = 270  # A4 - margin
+        page_height = 270  # высота A4 без нижнего отступа
 
         def draw_table_header():
             pdf.set_font("DejaVuSans", "B", 10)
+            x_start = pdf.get_x()
+            y_start = pdf.get_y()
             for i, header in enumerate(headers):
-                pdf.multi_cell(col_widths[i], line_height, header, border=1, align="C", ln=3, max_line_height=pdf.font_size)
-                pdf.set_xy(pdf.get_x() + col_widths[i], pdf.get_y() - line_height)
-            pdf.ln()
+                pdf.set_xy(x_start, y_start)
+                pdf.multi_cell(col_widths[i], line_height, header, border=1, align="C")
+                x_start += col_widths[i]
+            pdf.set_y(y_start + line_height)
             pdf.set_font("DejaVuSans", "", 10)
 
-        # Add table page
+        # Добавление страницы и заголовка таблицы
         pdf.add_page()
         draw_table_header()
 
@@ -1255,13 +1259,13 @@ def generate_pdf_report(start_date, end_date):
             data = [
                 clean_text(issue[0]),
                 clean_text(issue[1]),
-                clean_text(issue[2], 300),
+                clean_text(issue[2]),
                 "Сроч" if str(issue[3]).lower() == "urgent" else "Обыч",
                 "выполнено" if str(issue[4]).lower() == "completed" else "новый",
                 clean_text(issue[5])
             ]
 
-            # Estimate max lines needed per column
+            # Подсчет количества строк для каждой ячейки
             cell_lines = []
             for i, text in enumerate(data):
                 lines = pdf.multi_cell(col_widths[i], line_height, text, border=0, align='L', split_only=True)
@@ -1269,23 +1273,22 @@ def generate_pdf_report(start_date, end_date):
             max_lines = max(cell_lines)
             row_height = max_lines * line_height
 
-            # Add new page if needed
+            # Проверка на переход страницы
             if pdf.get_y() + row_height > page_height:
                 pdf.add_page()
                 draw_table_header()
 
-            # Draw the row
+            # Отрисовка строки таблицы
             x_start = pdf.get_x()
             y_start = pdf.get_y()
-
             for i, text in enumerate(data):
                 pdf.set_xy(x_start, y_start)
                 pdf.multi_cell(col_widths[i], line_height, text, border=1, align='L')
                 x_start += col_widths[i]
-
+                pdf.set_xy(x_start, y_start)
             pdf.set_y(y_start + row_height)
 
-        # Return PDF as bytes
+        # Сохранение PDF в память
         pdf_bytes = BytesIO()
         pdf.output(pdf_bytes)
         pdf_bytes.seek(0)
@@ -1301,7 +1304,7 @@ def generate_pdf_report(start_date, end_date):
     finally:
         if conn:
             conn.close()
-
+            
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
 ):
