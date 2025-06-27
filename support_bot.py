@@ -1903,7 +1903,11 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
             conn.commit()
 
-            # 4. Проверяем количество оставшихся записей после каскада
+            # 4. Удаляем запись из users независимо от роли
+            cur.execute("DELETE FROM users WHERE user_id = %s", (chat_id,))
+            conn.commit()
+
+            # 5. Проверяем количество оставшихся записей после каскада
             cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
             issue_count_after = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
@@ -1911,15 +1915,6 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             issues_deleted = issue_count_before - issue_count_after
             logs_deleted = log_count_before - log_count_after
             logger.info(f"Удалено {issues_deleted} заявок и {logs_deleted} логов каскадно для resident_id {resident_id}")
-
-            # 5. Пытаемся удалить из users (необязательно)
-            try:
-                cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", 
-                           (chat_id, SUPPORT_ROLES["user"]))
-            except psycopg2.Error as e:
-                logger.warning(f"Ошибка при удалении из users: {e}")
-
-            conn.commit()  # Подтверждаем изменения
 
             # Успешное сообщение с информацией о каскадном удалении
             await update.message.reply_text(
@@ -2132,41 +2127,41 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
             )
             resident_id = cur.fetchone()[0]
 
-            # Insert or update users table, handling optional username
+            # Insert or update users table for the resident
             username = update.effective_user.username if update.effective_user.username else None
             cur.execute(
                 """
                 INSERT INTO users (user_id, username, full_name, role, registration_date)
                 VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET role = %s, full_name = %s, username = EXCLUDED.username
+                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
                 """,
-                (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now(), SUPPORT_ROLES["user"], full_name),
+                (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
             )
             conn.commit()
 
-        # Attempt to notify the new resident
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="🏠 Вы зарегистрированы как резидент ЖК Сункар! Используйте /start для доступа к меню.",
-            )
-            logger.info(f"Successfully notified new resident (chat_id: {chat_id})")
-        except telegram.error.BadRequest as e:
-            logger.warning(f"Failed to notify new resident (chat_id: {chat_id}): {e}")
+            # Attempt to notify the new resident
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="🏠 Вы зарегистрированы как резидент ЖК Сункар! Используйте /start для доступа к меню.",
+                )
+                logger.info(f"Successfully notified new resident (chat_id: {chat_id})")
+            except telegram.error.BadRequest as e:
+                logger.warning(f"Failed to notify new resident (chat_id: {chat_id}): {e}")
+                await send_and_remember(
+                    update,
+                    context,
+                    f"⚠️ Не удалось уведомить резидента (chat ID: {chat_id}). Убедитесь, что пользователь запустил бота с /start.",
+                    main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
+                )
+
+            # Send success message to admin
             await send_and_remember(
                 update,
                 context,
-                f"⚠️ Не удалось уведомить резидента (chat ID: {chat_id}). Убедитесь, что пользователь запустил бота с /start.",
+                f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен с ID {resident_id}.",
                 main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
             )
-
-        # Send success message to admin
-        await send_and_remember(
-            update,
-            context,
-            f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен с ID {resident_id}.",
-            main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
-        )
     except psycopg2.Error as e:
         logger.error(f"Database error adding resident (chat_id={chat_id}): {e}")
         await send_and_remember(
