@@ -276,8 +276,10 @@ async def process_report_period(
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user phone and save resident data with comprehensive validation."""
     phone = update.message.text.strip()
+    logger.info(f"Received phone input for user {update.effective_user.id}: {phone}")
     phone_pattern = re.compile(r"^\+?\d{7,15}$")
     if not phone_pattern.match(phone):
+        logger.warning(f"Invalid phone format: {phone}")
         await send_and_remember(
             update,
             context,
@@ -299,11 +301,11 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         missing_fields = [field for field in required_fields if field not in context.user_data]
         if missing_fields:
-            logger.error(f"Missing required fields: {missing_fields}")
+            logger.error(f"Missing required fields for user {update.effective_user.id}: {missing_fields}")
             await send_and_remember(
                 update,
                 context,
-                "❌ Ошибка: отсутствуют необходимые данные. Пожалуйста, начните процесс заново.",
+                f"❌ Ошибка: отсутствуют данные ({', '.join(missing_fields)}). Начните заново.",
                 main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
             )
             return
@@ -314,7 +316,7 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 type_errors.append(f"{field} должен быть {field_type.__name__}")
         
         if type_errors:
-            logger.error(f"Type errors: {type_errors}")
+            logger.error(f"Type errors for user {update.effective_user.id}: {type_errors}")
             await send_and_remember(
                 update,
                 context,
@@ -324,12 +326,15 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         conn = get_db_connection()
+        logger.info(f"Connected to database for user {update.effective_user.id}")
         with conn.cursor() as cur:
+            logger.info(f"Checking if resident exists for chat_id {update.effective_user.id}")
             cur.execute(
                 "SELECT resident_id FROM residents WHERE chat_id = %s",
                 (update.effective_user.id,)
             )
             if cur.fetchone():
+                logger.info(f"Resident already exists for chat_id {update.effective_user.id}")
                 await send_and_remember(
                     update,
                     context,
@@ -349,6 +354,7 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 ),
             )
             resident_id = cur.fetchone()[0]
+            logger.info(f"Inserted resident ID {resident_id}")
 
             cur.execute(
                 """INSERT INTO issues (resident_id, description, category, status, created_at)
@@ -362,12 +368,14 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 ),
             )
             issue_id = cur.fetchone()[0]
+            logger.info(f"Inserted issue ID {issue_id}")
 
             cur.execute(
                 """INSERT INTO issue_logs (issue_id, action, user_id, action_time)
                 VALUES (%s, 'create', %s, NOW())""",
                 (issue_id, update.effective_user.id)
             )
+            logger.info(f"Logged issue creation for issue ID {issue_id}")
             
             conn.commit()
 
@@ -384,41 +392,33 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             
             context.user_data.clear()
+            logger.info(f"Cleared user_data for user {update.effective_user.id}")
 
-    except psycopg2.IntegrityError as e:
-        logger.error(f"Database integrity error: {e}")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка: проблема с сохранением данных. Пожалуйста, попробуйте позже.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
-        if conn:
-            conn.rollback()
     except psycopg2.Error as e:
-        logger.error(f"Database error during registration: {e}")
+        logger.error(f"Database error during registration for user {update.effective_user.id}: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка базы данных. Пожалуйста, попробуйте позже.",
+            f"❌ Ошибка базы данных: {e}",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         if conn:
             conn.rollback()
     except Exception as e:
-        logger.error(f"Unexpected error during registration: {e}", exc_info=True)
+        logger.error(f"Unexpected error during registration for user {update.effective_user.id}: {e}", exc_info=True)
         await send_and_remember(
             update,
             context,
-            "❌ Непредвиденная ошибка. Пожалуйста, попробуйте позже.",
+            f"❌ Непредвиденная ошибка: {e}",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         if conn:
             conn.rollback()
     finally:
         if conn:
+            logger.info("Closing database connection")
             conn.close()
-
+            
 async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save new agent to database."""
     if (
@@ -543,7 +543,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
         conn = get_db_connection()
         logger.info("Database connection established")
         with conn.cursor() as cur:
-            # Проверка существования таблицы
+            # Check if table exists
             cur.execute("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables 
@@ -552,7 +552,29 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             """)
             if not cur.fetchone()[0]:
                 logger.error("Table 'residents' does not exist")
-                raise Exception("Table 'residents' does not exist")
+                await send_and_remember(
+                    update,
+                    context,
+                    "❌ Ошибка: таблица residents не найдена.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+                )
+                return
+            # Check issues table
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'issues'
+                )
+            """)
+            if not cur.fetchone()[0]:
+                logger.error("Table 'issues' does not exist")
+                await send_and_remember(
+                    update,
+                    context,
+                    "❌ Ошибка: таблица issues не найдена.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+                )
+                return
 
             cur.execute(
                 """
@@ -566,7 +588,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 (update.effective_user.id,),
             )
             requests = cur.fetchall()
-            logger.info(f"Found {len(requests)} requests for user")
+            logger.info(f"Found {len(requests)} requests for user {update.effective_user.id}")
 
         if not requests:
             await send_and_remember(
@@ -594,15 +616,16 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
     except psycopg2.Error as e:
-        logger.error(f"Error retrieving user requests: {e}")
+        logger.error(f"Error retrieving user requests for {update.effective_user.id}: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка при получении данных.",
+            f"❌ Ошибка базы данных: {e}",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
     finally:
         if conn:
+            logger.info("Closing database connection")
             conn.close()
 
 async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1340,10 +1363,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "new_request":
             await process_new_request(update, context)
         elif query.data == "my_requests":
-            logger.info("My requests button pressed")  # Добавьте это
+            logger.info(f"User {user_id} pressed 'my_requests' button")
             await show_user_requests(update, context)
         elif query.data == "help":
-            logger.info("Help button pressed")  # Добавьте это
+            logger.info(f"User {user_id} pressed 'help' button")
             await show_help(update, context)
         elif query.data == "active_requests":
             await show_active_requests(update, context)
