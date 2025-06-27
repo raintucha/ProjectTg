@@ -184,6 +184,8 @@ async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT
             logger.warning(f"Message {context.user_data['last_message_id']} already deleted")
         else:
             logger.error(f"Failed to delete message: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error deleting message: {e}")
     finally:
         context.user_data.pop("last_message_id", None)
 
@@ -205,7 +207,13 @@ async def send_and_remember(
 ):
     """Send message and store its ID, deleting previous message with retry logic."""
     logger.info(f"Sending message to user {update.effective_user.id}: {text[:50]}...")
-    await delete_previous_messages(update, context)
+    
+    # Удаляем предыдущие сообщения с обработкой ошибок
+    try:
+        await delete_previous_messages(update, context)
+    except Exception as e:
+        logger.warning(f"Error deleting previous messages: {e}")
+    
     retries = 3
     for attempt in range(retries):
         try:
@@ -215,23 +223,20 @@ async def send_and_remember(
             context.user_data["last_message_id"] = message.message_id
             logger.info(f"Message sent, ID {message.message_id} stored for user {update.effective_user.id}")
             return message
+        except telegram.error.BadRequest as e:
+            if "Message to delete not found" in str(e):
+                logger.warning("Message to delete not found, continuing")
+                continue
+            raise
         except (NetworkError, TimedOut) as e:
             logger.warning(f"Network error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                await asyncio.sleep(2 ** attempt)
                 continue
             logger.error(f"Failed to send message after {retries} attempts: {e}")
-            await update.effective_chat.send_message(
-                "❌ Ошибка сети. Попробуйте снова позже.",
-                reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-            )
             raise
         except Exception as e:
             logger.error(f"Error sending message to user {update.effective_user.id}: {e}")
-            await update.effective_chat.send_message(
-                "❌ Ошибка при отправке сообщения. Попробуйте снова.",
-                reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-            )
             raise
 
 async def safe_db_connection(retries=3, delay=2):
@@ -1598,22 +1603,6 @@ async def generate_and_send_report(
     except Exception as e:
         logger.error(f"Error generating report: {e}")
         await processing_msg.edit_text(f"❌ Ошибка генерации отчета: {str(e)}")
-
-async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initiate bot shutdown with confirmation."""
-    if not await is_admin(update.effective_user.id):
-        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
-        return
-    keyboard = [
-        [InlineKeyboardButton("✅ Да, остановить", callback_data="confirm_shutdown")],
-        [InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_shutdown")],
-    ]
-    await send_and_remember(
-        update,
-        context,
-        "⚠️ Вы уверены, что хотите остановить бота?",
-        InlineKeyboardMarkup(keyboard),
-    )
 
 async def message_user(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int
