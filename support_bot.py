@@ -1173,7 +1173,7 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
 
 def generate_pdf_report(start_date, end_date):
-    """Generate PDF report with optimized layout for large datasets."""
+    """Generate PDF report with optimized layout and pagination for large datasets."""
     pdf = FPDF()
     conn = None
     try:
@@ -1210,7 +1210,7 @@ def generate_pdf_report(start_date, end_date):
                 logger.error(f"Error cleaning text '{text}': {e}")
                 return str(text).encode('ascii', errors='replace').decode('ascii')[:200]
 
-        # Header
+        # Header on first page
         pdf.cell(200, 10, txt=clean_text("Отчет по заявкам ЖК"), ln=1, align="C")
         pdf.cell(
             200,
@@ -1225,16 +1225,17 @@ def generate_pdf_report(start_date, end_date):
         col_widths = [35, 35, 80, 20, 20, 30]  # Total ~200mm (A4 width)
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         base_height = 6
-        margin = 10
-        rows_per_page = 30  # Adjust based on testing (approx. 30 rows fit A4 with this height)
+        margin = 20  # Increased margin to account for header space
+        page_height = 277  # A4 height (297mm) minus margin (20mm)
 
         def draw_table_header():
             for i, header in enumerate(headers):
                 pdf.cell(col_widths[i], 8, txt=clean_text(header), border=1, align="C")
             pdf.ln()
 
-        # Process issues
-        row_count = 0
+        # Add first table page
+        pdf.add_page()
+        draw_table_header()
         current_y = pdf.get_y()
         start_x = pdf.get_x()
 
@@ -1258,11 +1259,10 @@ def generate_pdf_report(start_date, end_date):
             row_height = base_height * max_lines
 
             # Check if new page is needed
-            if row_count == 0 or current_y + row_height > pdf.h - margin:
+            if current_y + row_height > page_height:
                 pdf.add_page()
                 draw_table_header()
                 current_y = pdf.get_y()
-                row_count = 0
 
             # Write the row
             pdf.set_xy(start_x, current_y)
@@ -1285,7 +1285,6 @@ def generate_pdf_report(start_date, end_date):
             max_y = max(max_y, pdf.get_y())
 
             current_y = max_y
-            row_count += 1
 
         pdf_bytes = BytesIO()
         pdf.output(pdf_bytes)
@@ -1302,7 +1301,7 @@ def generate_pdf_report(start_date, end_date):
     finally:
         if conn:
             conn.close()
-                      
+            
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
 ):
