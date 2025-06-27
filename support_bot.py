@@ -159,23 +159,36 @@ async def send_message_with_keyboard(update, context, text, keyboard):
 async def send_and_remember(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None
 ):
-    """Send message and store its ID, deleting previous message."""
+    """Send message and store its ID, deleting previous message with retry logic."""
     logger.info(f"Sending message to user {update.effective_user.id}: {text[:50]}...")
     await delete_previous_messages(update, context)
-    try:
-        message = await update.effective_chat.send_message(
-            text, reply_markup=reply_markup
-        )
-        context.user_data["last_message_id"] = message.message_id
-        logger.info(f"Message sent, ID {message.message_id} stored for user {update.effective_user.id}")
-        return message
-    except Exception as e:
-        logger.error(f"Error sending message to user {update.effective_user.id}: {e}")
-        await update.effective_chat.send_message(
-            "❌ Ошибка при отправке сообщения. Попробуйте снова.",
-            reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-        )
-        raise
+    retries = 3
+    for attempt in range(retries):
+        try:
+            message = await update.effective_chat.send_message(
+                text, reply_markup=reply_markup
+            )
+            context.user_data["last_message_id"] = message.message_id
+            logger.info(f"Message sent, ID {message.message_id} stored for user {update.effective_user.id}")
+            return message
+        except (NetworkError, TimedOut) as e:
+            logger.warning(f"Network error on attempt {attempt + 1}: {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                continue
+            logger.error(f"Failed to send message after {retries} attempts: {e}")
+            await update.effective_chat.send_message(
+                "❌ Ошибка сети. Попробуйте снова позже.",
+                reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+            )
+            raise
+        except Exception as e:
+            logger.error(f"Error sending message to user {update.effective_user.id}: {e}")
+            await update.effective_chat.send_message(
+                "❌ Ошибка при отправке сообщения. Попробуйте снова.",
+                reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+            )
+            raise
 
 async def safe_db_connection(retries=3, delay=2):
     """Try to establish DB connection with retries."""
@@ -1650,6 +1663,7 @@ async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages based on context."""
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
+    logger.info(f"Current context.user_data: {context.user_data}")
     if "awaiting_problem" in context.user_data:
         logger.info(f"Processing problem report for user {update.effective_user.id}")
         await process_problem_report(update, context)
@@ -1686,15 +1700,21 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     error = context.error
     if isinstance(error, (NetworkError, TimedOut)):
-        logger.warning(f"⚠️ Network error: {error}. Reconnecting...")
+        logger.warning(f"⚠️ Network error occurred: {error}. Attempting to reconnect...")
+        if update and update.effective_user:
+            await send_and_remember(
+                update,
+                context,
+                "⚠️ Проблема с сетью. Пожалуйста, попробуйте позже.",
+                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            )
         return
-    
-    logger.error("Exception:", exc_info=error)
+    logger.error("Exception occurred:", exc_info=context.error)
     if update and update.effective_user:
         await send_and_remember(
             update,
             context,
-            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в техподдержку.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
 
@@ -1765,6 +1785,7 @@ def main() -> None:
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
+            logger.info("✅ Registered CallbackQueryHandler for button_handler")
             application.add_handler(CallbackQueryHandler(button_handler))
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
             application.add_error_handler(error_handler)
@@ -1782,7 +1803,7 @@ def main() -> None:
             logger.error(f"⚠️ Bot crashed: {str(e)[:200]}")
             logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
-
+            
 if __name__ == '__main__':
     logger.info("🛠 Starting application...")
     time.sleep(8)
