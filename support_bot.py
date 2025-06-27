@@ -104,7 +104,7 @@ def get_db_connection():
         raise
 
 async def get_user_role(user_id: int) -> int:
-    """Retrieve user role from database."""
+    """Retrieve user role from database, ensuring user exists."""
     if user_id == DIRECTOR_CHAT_ID:
         return SUPPORT_ROLES["admin"]
     conn = None
@@ -113,7 +113,22 @@ async def get_user_role(user_id: int) -> int:
         with conn.cursor() as cur:
             cur.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
-            return result[0] if result else SUPPORT_ROLES["user"]
+            if not result:
+                # Auto-register if not found
+                username = None  # Adjust based on context if needed
+                full_name = "Unknown"  # Default name
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, registration_date)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    """,
+                    (user_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                )
+                conn.commit()
+                logger.info(f"Auto-registered user {user_id} in get_user_role")
+                return SUPPORT_ROLES["user"]
+            return result[0]
     except psycopg2.Error as e:
         logger.error(f"Error retrieving user role: {e}")
         return SUPPORT_ROLES["user"]
@@ -511,37 +526,43 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main_menu_keyboard(user_id, role, is_in_main_menu=False, user_type=None):
     """Generate main menu keyboard based on user role and type."""
     keyboard = []
-    if user_type == USER_TYPES["potential_buyer"]:
-        keyboard.append([InlineKeyboardButton("🏠 Информация о ЖК", callback_data="complex_info")])
-        keyboard.append([InlineKeyboardButton("💰 Цена за м²", callback_data="pricing_info")])
-        keyboard.append([InlineKeyboardButton("👥 Отдел продаж", callback_data="sales_team")])
-    elif user_type == USER_TYPES["resident"] or role == SUPPORT_ROLES["user"]:
+    # Check if user is a resident
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM residents WHERE chat_id = %s", (user_id,))
+            is_resident = cur.fetchone() is not None
+        if user_type == USER_TYPES["potential_buyer"]:
+            keyboard.append([InlineKeyboardButton("🏠 Информация о ЖК", callback_data="complex_info")])
+            keyboard.append([InlineKeyboardButton("💰 Цена за м²", callback_data="pricing_info")])
+            keyboard.append([InlineKeyboardButton("👥 Отдел продаж", callback_data="sales_team")])
+        elif is_resident or role == SUPPORT_ROLES["user"]:
+            keyboard.append([InlineKeyboardButton("➕ Новая заявка", callback_data="new_request")])
+            keyboard.append([InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")])
+            keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
+        elif role == SUPPORT_ROLES["agent"]:
+            keyboard.append([InlineKeyboardButton("📋 Все заявки", callback_data="all_requests")])
+            keyboard.append([InlineKeyboardButton("📊 Статистика", callback_data="stats")])
+            keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
+        elif role == SUPPORT_ROLES["admin"]:
+            keyboard.append([InlineKeyboardButton("📋 Все заявки", callback_data="all_requests")])
+            keyboard.append([InlineKeyboardButton("👥 Управление пользователями", callback_data="manage_users")])
+            keyboard.append([InlineKeyboardButton("📊 Статистика", callback_data="stats")])
+            keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
+    except psycopg2.Error as e:
+        logger.error(f"Database error in main_menu_keyboard: {e}")
+        # Fallback to basic menu for unregistered users
         keyboard.append([InlineKeyboardButton("➕ Новая заявка", callback_data="new_request")])
-        keyboard.append([InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")])
         keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
-    elif role == SUPPORT_ROLES["agent"]:
-        keyboard.append([InlineKeyboardButton("📬 Активные заявки", callback_data="active_requests")])
-        keyboard.append([InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")])
-        keyboard.append([InlineKeyboardButton("📖 Завершенные заявки", callback_data="completed_requests")])
-    elif role == SUPPORT_ROLES["admin"] or user_id == DIRECTOR_CHAT_ID:
-        keyboard.append([InlineKeyboardButton("📊 Отчеты", callback_data="reports_menu")])
-        keyboard.append([InlineKeyboardButton("👥 Управление персоналом", callback_data="manage_agents")])
-        keyboard.append([InlineKeyboardButton("🏠 Добавить резидента", callback_data="add_resident")])
-        keyboard.append([InlineKeyboardButton("🗑 Удалить резидента", callback_data="delete_resident")])
-        keyboard.append([InlineKeyboardButton("📬 Активные заявки", callback_data="active_requests")])
-        keyboard.append([InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")])
-        keyboard.append([InlineKeyboardButton("📖 Завершенные заявки", callback_data="completed_requests")])
-        keyboard.append([InlineKeyboardButton("🛑 Завершить работу бота", callback_data="shutdown_bot")])
+    finally:
+        if conn:
+            conn.close()
 
     btn = InlineKeyboardButton("🔙 Главное меню", callback_data="start")
     if is_in_main_menu:
         btn = InlineKeyboardButton("📍 Вы в главном меню", callback_data="do_nothing")
-
     keyboard.append([btn])
     return InlineKeyboardMarkup(keyboard)
-
-from telegram.ext import CommandHandler
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command and register user if they are a resident."""
     chat_id = update.effective_user.id
