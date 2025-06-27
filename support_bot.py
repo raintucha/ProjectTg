@@ -1942,7 +1942,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop("awaiting_resident_id_delete", None)
         context.user_data.pop("awaiting_resident_id_add", None)  # Clear any add state
         conn.close()
-        
+
 
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
@@ -1960,7 +1960,7 @@ async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_add"] = True
 
 async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process chat ID for new resident and prompt for name with enhanced validation and debugging."""
+    """Process chat ID for new resident and prompt for name with enhanced validation and state management."""
     if "awaiting_resident_id_add" not in context.user_data:
         await send_and_remember(
             update,
@@ -2001,13 +2001,14 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         finally:
             conn.close()
 
-        # Proceed to next step
+        # Transition to awaiting full name
         await send_and_remember(
             update,
             context,
             "👤 Введите ФИО резидента:",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
         )
+        context.user_data.pop("awaiting_resident_id_add", None)  # Clear the old state
         context.user_data["awaiting_new_resident_name"] = True
     except ValueError as e:
         logger.error(f"Invalid chat ID format: '{chat_id_input}', sanitized: '{sanitized_input}', error: {e}")
@@ -2028,9 +2029,7 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
     finally:
         if 'conn' in locals() and conn:
             conn.close()
-        if "awaiting_new_resident_name" not in context.user_data:
-            context.user_data.pop("awaiting_resident_id_add", None)
-
+            
 async def process_new_resident_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process name for new resident and prompt for address."""
     if "awaiting_new_resident_name" not in context.user_data:
