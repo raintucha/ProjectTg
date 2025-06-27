@@ -1,4 +1,4 @@
-
+import telegram  # Добавьте эту строку в импорты
 import logging
 import os
 import re
@@ -2088,13 +2088,40 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
         )
         return
-    phone = update.message.text
-    chat_id = context.user_data.get("new_resident_chat_id")
-    full_name = context.user_data.get("new_resident_name")
-    address = context.user_data.get("new_resident_address")
+
+    # Validate required data
+    required_keys = ["new_resident_chat_id", "new_resident_name", "new_resident_address"]
+    missing_keys = [key for key in required_keys if key not in context.user_data]
+    if missing_keys:
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Отсутствуют данные: {', '.join(missing_keys)}. Начните заново.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+        )
+        return
+
+    phone = update.message.text.strip()
+    chat_id = context.user_data["new_resident_chat_id"]
+    full_name = context.user_data["new_resident_name"]
+    address = context.user_data["new_resident_address"]
+    admin_user_id = update.effective_user.id
+    admin_role = await get_user_role(admin_user_id)
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
+            # Check for existing resident
+            cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
+            if cur.fetchone():
+                await send_and_remember(
+                    update,
+                    context,
+                    f"❌ Пользователь с chat ID {chat_id} уже зарегистрирован как резидент.",
+                    main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
+                )
+                return
+
             # Insert into residents table
             cur.execute(
                 """
@@ -2104,25 +2131,20 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
                 (chat_id, full_name, address, phone, datetime.now()),
             )
             resident_id = cur.fetchone()[0]
-            # Insert or update users table
+
+            # Insert or update users table, handling optional username
+            username = update.effective_user.username if update.effective_user.username else None
             cur.execute(
                 """
                 INSERT INTO users (user_id, username, full_name, role, registration_date)
                 VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET role = %s, full_name = %s
+                ON CONFLICT (user_id) DO UPDATE SET role = %s, full_name = %s, username = EXCLUDED.username
                 """,
-                (chat_id, update.effective_user.username, full_name, SUPPORT_ROLES["user"], datetime.now(), SUPPORT_ROLES["user"], full_name),
+                (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now(), SUPPORT_ROLES["user"], full_name),
             )
             conn.commit()
-        # Update user_type for the new resident
-        context.user_data["user_type"] = USER_TYPES["resident"]
-        await send_and_remember(
-            update,
-            context,
-            f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен с ID {resident_id}.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
-        )
-        # Attempt to notify the new resident, handle failure gracefully
+
+        # Attempt to notify the new resident
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -2135,15 +2157,23 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
                 update,
                 context,
                 f"⚠️ Не удалось уведомить резидента (chat ID: {chat_id}). Убедитесь, что пользователь запустил бота с /start.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+                main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
             )
+
+        # Send success message to admin
+        await send_and_remember(
+            update,
+            context,
+            f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен с ID {resident_id}.",
+            main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
+        )
     except psycopg2.Error as e:
-        logger.error(f"Database error adding resident: {e}")
+        logger.error(f"Database error adding resident (chat_id={chat_id}): {e}")
         await send_and_remember(
             update,
             context,
             "❌ Ошибка базы данных. Попробуйте позже.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+            main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
         )
         conn.rollback()
     finally:
@@ -2152,7 +2182,7 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
         context.user_data.pop("new_resident_name", None)
         context.user_data.pop("new_resident_address", None)
         conn.close()
-        
+
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages based on context."""
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
