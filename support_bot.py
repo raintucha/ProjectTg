@@ -542,12 +542,10 @@ def main_menu_keyboard(user_id, role, is_in_main_menu=False, user_type=None):
             keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
         elif role == SUPPORT_ROLES["agent"]:
             keyboard.append([InlineKeyboardButton("📋 Все заявки", callback_data="all_requests")])
-            keyboard.append([InlineKeyboardButton("📊 Статистика", callback_data="stats")])
             keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
         elif role == SUPPORT_ROLES["admin"]:
             keyboard.append([InlineKeyboardButton("📋 Все заявки", callback_data="all_requests")])
             keyboard.append([InlineKeyboardButton("👥 Управление пользователями", callback_data="manage_users")])
-            keyboard.append([InlineKeyboardButton("📊 Статистика", callback_data="stats")])
             keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
     except psycopg2.Error as e:
         logger.error(f"Database error in main_menu_keyboard: {e}")
@@ -563,6 +561,7 @@ def main_menu_keyboard(user_id, role, is_in_main_menu=False, user_type=None):
         btn = InlineKeyboardButton("📍 Вы в главном меню", callback_data="do_nothing")
     keyboard.append([btn])
     return InlineKeyboardMarkup(keyboard)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command and register user if they are a resident."""
     chat_id = update.effective_user.id
@@ -802,7 +801,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         conn.close()
 
-    # Proceed with resident check
+    # Proceed with resident check and registration
     conn = None
     try:
         conn = get_db_connection()
@@ -814,7 +813,28 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
                 (update.effective_user.id,)
             )
             resident = cur.fetchone()
-            logger.info(f"Resident found: {resident is not None}")
+            if resident:
+                resident_id = resident[0]
+                issue_id = await save_request_to_db(update, context, resident_id)
+                if context.user_data["is_urgent"]:
+                    await send_urgent_alert(update, context, issue_id)
+                await send_and_remember(
+                    update,
+                    context,
+                    "✅ Заявка принята!\n\n"
+                    f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
+                    f"Номер заявки: #{issue_id}",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+                )
+                context.user_data.clear()
+            else:
+                context.user_data["awaiting_name"] = True
+                await send_and_remember(
+                    update,
+                    context,
+                    "👤 Введите ваше ФИО:",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+                )
     except psycopg2.Error as e:
         logger.error(f"Database error in resident check: {e}")
         await send_and_remember(
@@ -823,7 +843,8 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
-        return
+        if conn:
+            conn.rollback()
     finally:
         if conn:
             logger.info("Closing database connection")
@@ -973,21 +994,22 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    f"{'🚨' if req[4] == 'urgent' else '📋'} #{req[0]} от {req[1]}",
-                    callback_data=f"request_detail_{req[0]}",
-                )
-            ]
-            for req in requests
-        ]
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        text = "📋 Активные заявки:\n\n"
+        for req in requests:
+            text += (
+                f"🆔 Номер: #{req[0]}\n"
+                f"👤 От: {req[1]}\n"
+                f"📅 Дата: {req[3].strftime('%d.%m.%Y %H:%M')}\n"
+                f"🚨 Тип: {'Срочная' if req[4] == 'urgent' else 'Обычная'}\n"
+                f"📝 Описание: {req[2][:100]}{'...' if len(req[2]) > 100 else ''}\n\n"
+            )
+
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
 
         await send_and_remember(
             update,
             context,
-            "📋 Активные заявки:",
+            text,
             InlineKeyboardMarkup(keyboard),
         )
     except psycopg2.Error as e:
@@ -1204,20 +1226,21 @@ async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    f"🚨 #{req[0]} от {req[1]}", callback_data=f"request_detail_{req[0]}"
-                )
-            ]
-            for req in requests
-        ]
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        text = "🚨 Срочные заявки:\n\n"
+        for req in requests:
+            text += (
+                f"🆔 Номер: #{req[0]}\n"
+                f"👤 От: {req[1]}\n"
+                f"📅 Дата: {req[3].strftime('%d.%m.%Y %H:%M')}\n"
+                f"📝 Описание: {req[2][:100]}{'...' if len(req[2]) > 100 else ''}\n\n"
+            )
+
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
 
         await send_and_remember(
             update,
             context,
-            "🚨 Срочные заявки:",
+            text,
             InlineKeyboardMarkup(keyboard),
         )
     except psycopg2.Error as e:
