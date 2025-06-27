@@ -1929,7 +1929,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
                 main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
             )
     except psycopg2.Error as e:
-        logger.error(f"Database error deleting resident: {e}")
+        logger.error(f"Database error deleting resident (chat_id={chat_id}, resident_id={resident_id}): {e}")
         await send_and_remember(
             update,
             context,
@@ -1938,9 +1938,12 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
         )
         conn.rollback()
     finally:
+        # Clear all conflicting states
         context.user_data.pop("awaiting_resident_id_delete", None)
+        context.user_data.pop("awaiting_resident_id_add", None)  # Clear any add state
         conn.close()
         
+
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
     user_id = update.effective_user.id
@@ -1957,7 +1960,7 @@ async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_add"] = True
 
 async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process chat ID for new resident and prompt for name with enhanced validation."""
+    """Process chat ID for new resident and prompt for name with enhanced validation and debugging."""
     if "awaiting_resident_id_add" not in context.user_data:
         await send_and_remember(
             update,
@@ -1968,9 +1971,16 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         return
 
     chat_id_input = update.message.text.strip()
-    logger.info(f"Received raw chat ID input for new resident: '{chat_id_input}'")
+    logger.info(f"Received raw chat ID input for new resident: '{chat_id_input}' (length: {len(chat_id_input)}, type: {type(chat_id_input)})")
+    logger.info(f"Full update message: {update.message.to_dict()}")
+
     try:
-        chat_id = int(chat_id_input)
+        # Sanitize input by removing any non-digit characters
+        sanitized_input = re.sub(r'[^\d]', '', chat_id_input)
+        logger.info(f"Sanitized chat ID input: '{sanitized_input}' (length: {len(sanitized_input)})")
+        if not sanitized_input:
+            raise ValueError("No valid digits found in input")
+        chat_id = int(sanitized_input)
         if chat_id <= 0:
             raise ValueError("Chat ID must be a positive number")
         context.user_data["new_resident_chat_id"] = chat_id
@@ -2000,11 +2010,11 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         )
         context.user_data["awaiting_new_resident_name"] = True
     except ValueError as e:
-        logger.error(f"Invalid chat ID format: '{chat_id_input}', error: {e}")
+        logger.error(f"Invalid chat ID format: '{chat_id_input}', sanitized: '{sanitized_input}', error: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Неверный формат chat ID. Введите положительное число (например, 123456789). Проверьте, нет ли пробелов или букв.",
+            "❌ Неверный формат chat ID. Введите положительное число (например, 123456789). Проверьте, нет ли скрытых символов. Лог: " + str(e),
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
         )
     except psycopg2.Error as e:
@@ -2020,7 +2030,7 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
             conn.close()
         if "awaiting_new_resident_name" not in context.user_data:
             context.user_data.pop("awaiting_resident_id_add", None)
-            
+
 async def process_new_resident_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process name for new resident and prompt for address."""
     if "awaiting_new_resident_name" not in context.user_data:
