@@ -1871,73 +1871,66 @@ async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаление резидента с обработкой случаев, когда его нет в users"""
+    """Удаление резидента с улучшенной обработкой ошибок"""
     try:
-        chat_id = int(update.message.text)
+        chat_id = int(update.message.text.strip())
     except ValueError:
-        await send_and_remember(
-            update,
-            context,
-            "❌ Неверный формат chat ID. Введите число.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
-        )
+        await update.message.reply_text("❌ Неверный формат ID. Введите числовой chat ID.")
         return
 
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Проверяем существование резидента
+            # 1. Проверяем существование резидента
             cur.execute("SELECT resident_id, full_name FROM residents WHERE chat_id = %s", (chat_id,))
             resident = cur.fetchone()
             
             if not resident:
-                await send_and_remember(
-                    update,
-                    context,
-                    f"❌ Резидент с chat ID {chat_id} не найден.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-                )
+                await update.message.reply_text(f"❌ Резидент с chat ID {chat_id} не найден.")
                 return
 
             resident_id, full_name = resident
 
-            # Удаляем связанные заявки (если есть)
-            cur.execute("DELETE FROM issues WHERE resident_id = %s", (resident_id,))
-            
-            # Удаляем из residents
+            # 2. Удаляем связанные заявки (если таблица существует)
+            try:
+                cur.execute("DELETE FROM issues WHERE resident_id = %s", (resident_id,))
+                logger.info(f"Удалено заявок: {cur.rowcount}")
+            except psycopg2.Error as e:
+                logger.warning(f"Таблица issues не найдена или ошибка при удалении заявок: {e}")
+
+            # 3. Удаляем самого резидента
             cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
             
-            # Пытаемся удалить из users (если есть), но не обязательно
-            cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", 
-                       (chat_id, SUPPORT_ROLES["user"]))
-            
-            conn.commit()
+            # 4. Пытаемся удалить из users (необязательно)
+            try:
+                cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", 
+                           (chat_id, SUPPORT_ROLES["user"]))
+            except psycopg2.Error as e:
+                logger.warning(f"Ошибка при удалении из users: {e}")
 
-        await send_and_remember(
-            update,
-            context,
-            f"✅ Резидент {full_name} (chat ID: {chat_id}) успешно удалён.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
+            conn.commit()  # Важно: подтверждаем изменения!
+            
+            # Успешное сообщение
+            await update.message.reply_text(
+                f"✅ Резидент {full_name} (ID: {chat_id}) успешно удалён.\n"
+                f"Удалено заявок: {cur.rowcount}",
+                reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+            )
 
     except psycopg2.Error as e:
-        logger.error(f"Database error deleting resident: {e}")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка базы данных при удалении.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        logger.error(f"Database error: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка базы данных: {e.pgerror if hasattr(e, 'pgerror') else str(e)}",
+            reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
         if conn:
             conn.rollback()
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Непредвиденная ошибка.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        await update.message.reply_text(
+            f"❌ Непредвиденная ошибка: {str(e)}",
+            reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
     finally:
         if conn:
