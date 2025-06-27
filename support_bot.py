@@ -1240,8 +1240,8 @@ def generate_pdf_report(start_date, end_date):
             status = clean_text(issue[4])
             closed_by = clean_text(issue[7])
 
-            # Check if adding this row exceeds page height
-            row_height = base_height * max(
+            # Calculate maximum lines for row height
+            max_lines = max(
                 len(full_name.split('\n')),
                 len(address.split('\n')),
                 len(description.split('\n')),
@@ -1249,6 +1249,9 @@ def generate_pdf_report(start_date, end_date):
                 len(status.split('\n')),
                 len(closed_by.split('\n'))
             )
+            row_height = base_height * max_lines
+
+            # Check if adding this row exceeds page height
             if current_y + row_height > pdf.h - margin:  # h is page height (e.g., 297mm for A4)
                 pdf.add_page()
                 current_y = margin
@@ -1260,17 +1263,18 @@ def generate_pdf_report(start_date, end_date):
 
             # Write the row
             start_x = pdf.get_x()
-            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L", ln=3)
+            pdf.set_y(current_y)
+            pdf.multi_cell(col_widths[0], base_height, full_name, border=1, align="L")
             pdf.set_xy(start_x + col_widths[0], current_y)
-            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L", ln=3)
+            pdf.multi_cell(col_widths[1], base_height, address, border=1, align="L")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1], current_y)
-            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L", ln=3)
+            pdf.multi_cell(col_widths[2], base_height, description, border=1, align="L")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2], current_y)
-            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C", ln=3)
+            pdf.multi_cell(col_widths[3], base_height, category, border=1, align="C")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3], current_y)
-            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C", ln=3)
+            pdf.multi_cell(col_widths[4], base_height, status, border=1, align="C")
             pdf.set_xy(start_x + col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4], current_y)
-            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L", ln=3)
+            pdf.multi_cell(col_widths[5], base_height, closed_by, border=1, align="L")
 
             current_y += row_height  # Update current Y position for the next row
 
@@ -1289,7 +1293,7 @@ def generate_pdf_report(start_date, end_date):
     finally:
         if conn:
             conn.close()
-
+            
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
 ):
