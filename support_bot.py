@@ -1221,8 +1221,8 @@ def generate_pdf_report(start_date, end_date):
         )
         pdf.ln(10)
 
-        # Column definitions
-        col_widths = [35, 35, 80, 20, 20, 30]  # Total ~200mm (A4 width)
+        # Adjusted column widths to fit within ~190mm usable width
+        col_widths = [30, 30, 70, 20, 20, 20]  # Total ~190mm
         headers = ["ФИО", "Адрес", "Описание", "Тип", "Статус", "Закрыл"]
         base_height = 6
         margin = 20  # Increased margin to account for header space
