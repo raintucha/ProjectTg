@@ -1867,7 +1867,7 @@ async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete resident from database and clear user_type."""
+    """Delete resident from database and clear user_type, handling foreign key constraints."""
     if "awaiting_resident_id_delete" not in context.user_data:
         await send_and_remember(
             update,
@@ -1889,8 +1889,8 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Check if resident exists
-            cur.execute("SELECT full_name FROM residents WHERE chat_id = %s", (chat_id,))
+            # Find resident_id based on chat_id
+            cur.execute("SELECT resident_id, full_name FROM residents WHERE chat_id = %s", (chat_id,))
             resident = cur.fetchone()
             if not resident:
                 await send_and_remember(
@@ -1900,8 +1900,22 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
                     main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
                 )
                 return
+            resident_id, full_name = resident
+
+            # Check for associated issues
+            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
+            issue_count = cur.fetchone()[0]
+            if issue_count > 0:
+                await send_and_remember(
+                    update,
+                    context,
+                    f"❌ Нельзя удалить резидента {full_name} (chat ID: {chat_id}). Есть {issue_count} связанных заявок. Удалите или переприсвойте их сначала.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+                )
+                return
+
             # Delete from residents table
-            cur.execute("DELETE FROM residents WHERE chat_id = %s", (chat_id,))
+            cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
             # Optionally delete from users table
             cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", (chat_id, SUPPORT_ROLES["user"]))
             conn.commit()
@@ -1911,7 +1925,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
             await send_and_remember(
                 update,
                 context,
-                f"✅ Резидент {resident[0]} (chat ID: {chat_id}) удален.",
+                f"✅ Резидент {full_name} (chat ID: {chat_id}) удален.",
                 main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
             )
     except psycopg2.Error as e:
@@ -1943,7 +1957,7 @@ async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_add"] = True
 
 async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process chat ID for new resident and prompt for name."""
+    """Process chat ID for new resident and prompt for name with better validation."""
     if "awaiting_resident_id_add" not in context.user_data:
         await send_and_remember(
             update,
@@ -1953,22 +1967,29 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    conn = get_db_connection()
+    chat_id_input = update.message.text.strip()
+    logger.info(f"Received chat ID input for new resident: {chat_id_input}")
     try:
-        chat_id = int(update.message.text)
+        chat_id = int(chat_id_input)
+        if chat_id <= 0:
+            raise ValueError("Chat ID must be positive")
         context.user_data["new_resident_chat_id"] = chat_id
 
         # Check if already a resident
-        with conn.cursor() as cur:
-            cur.execute("SELECT chat_id FROM residents WHERE chat_id = %s", (chat_id,))
-            if cur.fetchone():
-                await send_and_remember(
-                    update,
-                    context,
-                    f"❌ Пользователь с chat ID {chat_id} уже зарегистрирован как резидент.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
-                )
-                return
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT chat_id FROM residents WHERE chat_id = %s", (chat_id,))
+                if cur.fetchone():
+                    await send_and_remember(
+                        update,
+                        context,
+                        f"❌ Пользователь с chat ID {chat_id} уже зарегистрирован как резидент.",
+                        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+                    )
+                    return
+        finally:
+            conn.close()
 
         # Proceed to next step
         await send_and_remember(
@@ -1978,11 +1999,12 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
         )
         context.user_data["awaiting_new_resident_name"] = True
-    except ValueError:
+    except ValueError as e:
+        logger.error(f"Invalid chat ID format: {chat_id_input}, error: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Неверный формат chat ID. Введите число.",
+            "❌ Неверный формат chat ID. Введите положительное число (например, 123456789).",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
         )
     except psycopg2.Error as e:
@@ -1994,12 +2016,11 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
         )
     finally:
-        if 'conn' in locals():
+        if 'conn' in locals() and conn:
             conn.close()
-        # Only clear awaiting_resident_id_add if the process fails or completes without proceeding
         if "awaiting_new_resident_name" not in context.user_data:
             context.user_data.pop("awaiting_resident_id_add", None)
-
+            
 async def process_new_resident_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process name for new resident and prompt for address."""
     if "awaiting_new_resident_name" not in context.user_data:
