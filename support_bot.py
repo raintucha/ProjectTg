@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 # Role constants
 SUPPORT_ROLES = {"user": 1, "agent": 2, "admin": 3}
+USER_TYPES = {"resident": "resident", "potential_buyer": "potential_buyer"}
 def init_db():
     """Initialize database tables if they don't exist."""
     conn = None
@@ -503,10 +504,14 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             conn.close()
 
-def main_menu_keyboard(user_id, role, is_in_main_menu=False):
-    """Generate main menu keyboard based on user role."""
+def main_menu_keyboard(user_id, role, is_in_main_menu=False, user_type=None):
+    """Generate main menu keyboard based on user role and type."""
     keyboard = []
-    if role == SUPPORT_ROLES["user"]:
+    if user_type == USER_TYPES["potential_buyer"]:
+        keyboard.append([InlineKeyboardButton("🏠 Информация о ЖК", callback_data="complex_info")])
+        keyboard.append([InlineKeyboardButton("💰 Цена за м²", callback_data="pricing_info")])
+        keyboard.append([InlineKeyboardButton("👥 Отдел продаж", callback_data="sales_team")])
+    elif user_type == USER_TYPES["resident"] or role == SUPPORT_ROLES["user"]:
         keyboard.append([InlineKeyboardButton("➕ Новая заявка", callback_data="new_request")])
         keyboard.append([InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")])
         keyboard.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="help")])
@@ -522,7 +527,6 @@ def main_menu_keyboard(user_id, role, is_in_main_menu=False):
         keyboard.append([InlineKeyboardButton("📖 Завершенные заявки", callback_data="completed_requests")])
         keyboard.append([InlineKeyboardButton("🛑 Завершить работу бота", callback_data="shutdown_bot")])
 
-    # Set a default button, overriding based on is_in_main_menu
     btn = InlineKeyboardButton("🔙 Главное меню", callback_data="start")
     if is_in_main_menu:
         btn = InlineKeyboardButton("📍 Вы в главном меню", callback_data="do_nothing")
@@ -534,11 +538,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
+    
+    # If user already has a type or is an agent/admin, show main menu
+    if context.user_data.get("user_type") or role in [SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]]:
+        await send_and_remember(
+            update,
+            context,
+            "🏠 Добро пожаловать в службу поддержки ЖК Сункар\n\nВыберите действие:",
+            main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=context.user_data.get("user_type")),
+        )
+    else:
+        # Prompt user to select their type
+        keyboard = [
+            [InlineKeyboardButton("🏠 Я житель", callback_data="select_resident")],
+            [InlineKeyboardButton("🔍 Я потенциальный покупатель", callback_data="select_potential_buyer")],
+        ]
+        await send_and_remember(
+            update,
+            context,
+            "🏠 Добро пожаловать в службу поддержки ЖК Сункар\n\nПожалуйста, выберите, кто вы:",
+            InlineKeyboardMarkup(keyboard),
+        )
+
+async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
+    """Set the user type and show the main menu."""
+    user_id = update.effective_user.id
+    context.user_data["user_type"] = user_type
+    role = await get_user_role(user_id)
     await send_and_remember(
         update,
         context,
-        "🏠 Добро Пожаловать в службу поддержки ЖК Сункар\n\nВыберите действие:",
-        main_menu_keyboard(user_id, role, is_in_main_menu=True),
+        f"🏠 Вы вошли как {'житель' if user_type == USER_TYPES['resident'] else 'потенциальный покупатель'}.\n\nВыберите действие:",
+        main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type),
     )
 
 async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1405,7 +1436,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle button callbacks."""
     query = update.callback_query
     if query.data == "do_nothing":
-        return 
+        return
     if not query:
         logger.error("No callback query received")
         return
@@ -1416,6 +1447,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         if query.data == "start":
             await start(update, context)
+        elif query.data == "select_resident":
+            await select_user_type(update, context, USER_TYPES["resident"])
+        elif query.data == "select_potential_buyer":
+            await select_user_type(update, context, USER_TYPES["potential_buyer"])
+        elif query.data == "complex_info":
+            await show_complex_info(update, context)
+        elif query.data == "pricing_info":
+            await show_pricing_info(update, context)
+        elif query.data == "sales_team":
+            await show_sales_team(update, context)
+        elif query.data == "ask_sales_question":
+            await ask_sales_question(update, context)
         elif query.data == "new_request":
             await process_new_request(update, context)
         elif query.data == "my_requests":
@@ -1478,7 +1521,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 update,
                 context,
                 "⚠️ Команда не распознана",
-                main_menu_keyboard(user_id, role),
+                main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
             )
     except psycopg2.Error as e:
         logger.error(f"Database error in button_handler: {e}")
@@ -1486,7 +1529,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             f"❌ Ошибка базы данных: {e}",
-            main_menu_keyboard(user_id, role),
+            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
         )
     except Exception as e:
         logger.error(f"Unexpected error in button_handler: {e}")
@@ -1494,9 +1537,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             f"❌ Ошибка: {e}",
-            main_menu_keyboard(user_id, role),
+            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
         )
-
+        
 async def show_agent_info(
     update: Update, context: ContextTypes.DEFAULT_TYPE, agent_id: int
 ):
@@ -1670,6 +1713,121 @@ async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if conn:
             conn.close()
 
+async def show_complex_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show information about the residential complex."""
+    if context.user_data.get("user_type") != USER_TYPES["potential_buyer"]:
+        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+        return
+    text = (
+        "🏠 Информация о ЖК Сункар:\n\n"
+        "ЖК Сункар – современный жилой комплекс с развитой инфраструктурой.\n"
+        "📍 Расположение: г. Алматы, ул. Примерная, 123\n"
+        "🌳 Особенности: зеленые зоны, детские площадки, паркинг\n"
+        "🏬 Типы квартир: 1, 2, 3-комнатные\n"
+        "📞 Контакт: @SunqarSales"
+    )
+    await send_and_remember(
+        update,
+        context,
+        text,
+        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+    )
+
+async def show_pricing_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pricing information per square meter."""
+    if context.user_data.get("user_type") != USER_TYPES["potential_buyer"]:
+        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+        return
+    text = (
+        "💰 Цена за квадратный метр в ЖК Сункар:\n\n"
+        "• 1-комнатные: 300,000 KZT/м²\n"
+        "• 2-комнатные: 280,000 KZT/м²\n"
+        "• 3-комнатные: 270,000 KZT/м²\n\n"
+        "📞 Для точной стоимости свяжитесь с отделом продаж: @SunqarSales"
+    )
+    await send_and_remember(
+        update,
+        context,
+        text,
+        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+    )
+
+async def show_sales_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show sales team contact information and option to ask a question."""
+    if context.user_data.get("user_type") != USER_TYPES["potential_buyer"]:
+        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+        return
+    text = (
+        "👥 Отдел продаж ЖК Сункар:\n\n"
+        "1. Иван Иванов – @IvanSales – +7 777 123 4567\n"
+        "2. Анна Смирнова – @AnnaSales – +7 777 987 6543\n\n"
+        "📞 Свяжитесь напрямую или задайте вопрос здесь:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("✍️ Задать вопрос", callback_data="ask_sales_question")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+    ]
+    await send_and_remember(
+        update,
+        context,
+        text,
+        InlineKeyboardMarkup(keyboard),
+    )
+
+async def ask_sales_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Prompt user to ask a sales question."""
+    if context.user_data.get("user_type") != USER_TYPES["potential_buyer"]:
+        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+        return
+    await send_and_remember(
+        update,
+        context,
+        "✍️ Введите ваш вопрос для отдела продаж:",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
+    )
+    context.user_data["awaiting_sales_question"] = True
+
+async def process_sales_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process and forward sales question to the sales team."""
+    if "awaiting_sales_question" not in context.user_data:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается вопрос.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+        )
+        return
+    question = update.message.text
+    user = update.effective_user
+    try:
+        # Forward question to sales team (e.g., director or sales channel)
+        await context.bot.send_message(
+            chat_id=DIRECTOR_CHAT_ID,  # Or replace with a sales team chat ID
+            text=(
+                f"❓ Новый вопрос от потенциального покупателя:\n\n"
+                f"👤 От: {user.full_name} (@{user.username or 'нет'})\n"
+                f"🆔 ID: {user.id}\n"
+                f"📝 Вопрос: {question}\n"
+                f"🕒 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+            ),
+        )
+        await send_and_remember(
+            update,
+            context,
+            "✅ Ваш вопрос отправлен в отдел продаж! Ожидайте ответа.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+        )
+    except Exception as e:
+        logger.error(f"Error forwarding sales question: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка при отправке вопроса. Попробуйте позже.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+        )
+    finally:
+        context.user_data.pop("awaiting_sales_question", None)
+
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages based on context."""
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
@@ -1698,14 +1856,22 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "awaiting_user_message" in context.user_data:
         logger.info(f"Processing user message for user {update.effective_user.id}")
         await send_user_message(update, context)
+    elif "awaiting_sales_question" in context.user_data:
+        logger.info(f"Processing sales question for user {update.effective_user.id}")
+        await process_sales_question(update, context)
     else:
         logger.warning(f"No awaiting state for user {update.effective_user.id}")
         await send_and_remember(
             update,
             context,
             "⚠️ Неизвестная команда. Используйте кнопки меню.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            main_menu_keyboard(
+                update.effective_user.id,
+                await get_user_role(update.effective_user.id),
+                user_type=context.user_data.get("user_type")
+            ),
         )
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     error = context.error
