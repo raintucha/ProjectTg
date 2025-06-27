@@ -1867,7 +1867,7 @@ async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete resident from database and clear user_type, handling foreign key constraints."""
+    """Delete resident from database and clear user_type, handling foreign key constraints and completed issues."""
     if "awaiting_resident_id_delete" not in context.user_data:
         await send_and_remember(
             update,
@@ -1902,14 +1902,14 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
                 return
             resident_id, full_name = resident
 
-            # Check for associated issues
-            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
+            # Check for associated issues (exclude completed ones)
+            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s AND status != 'completed'", (resident_id,))
             issue_count = cur.fetchone()[0]
             if issue_count > 0:
                 await send_and_remember(
                     update,
                     context,
-                    f"❌ Нельзя удалить резидента {full_name} (chat ID: {chat_id}). Есть {issue_count} связанных заявок. Удалите или переприсвойте их сначала.",
+                    f"❌ Нельзя удалить резидента {full_name} (chat ID: {chat_id}). Есть {issue_count} незавершенных связанных заявок. Удалите или переприсвойте их сначала.",
                     main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
                 )
                 return
@@ -1940,7 +1940,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
     finally:
         context.user_data.pop("awaiting_resident_id_delete", None)
         conn.close()
-
+        
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
     user_id = update.effective_user.id
@@ -1957,7 +1957,7 @@ async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_add"] = True
 
 async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process chat ID for new resident and prompt for name with better validation."""
+    """Process chat ID for new resident and prompt for name with enhanced validation."""
     if "awaiting_resident_id_add" not in context.user_data:
         await send_and_remember(
             update,
@@ -1968,11 +1968,11 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         return
 
     chat_id_input = update.message.text.strip()
-    logger.info(f"Received chat ID input for new resident: {chat_id_input}")
+    logger.info(f"Received raw chat ID input for new resident: '{chat_id_input}'")
     try:
         chat_id = int(chat_id_input)
         if chat_id <= 0:
-            raise ValueError("Chat ID must be positive")
+            raise ValueError("Chat ID must be a positive number")
         context.user_data["new_resident_chat_id"] = chat_id
 
         # Check if already a resident
@@ -2000,11 +2000,11 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         )
         context.user_data["awaiting_new_resident_name"] = True
     except ValueError as e:
-        logger.error(f"Invalid chat ID format: {chat_id_input}, error: {e}")
+        logger.error(f"Invalid chat ID format: '{chat_id_input}', error: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Неверный формат chat ID. Введите положительное число (например, 123456789).",
+            "❌ Неверный формат chat ID. Введите положительное число (например, 123456789). Проверьте, нет ли пробелов или букв.",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
         )
     except psycopg2.Error as e:
