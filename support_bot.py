@@ -1946,7 +1946,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop("awaiting_resident_id_delete", None)
         context.user_data.pop("awaiting_resident_id_add", None)
         conn.close()
-        
+
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
     user_id = update.effective_user.id
@@ -2079,7 +2079,7 @@ async def process_new_resident_address(update: Update, context: ContextTypes.DEF
     context.user_data["awaiting_new_resident_phone"] = True
 
 async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save new resident to database and update user_type."""
+    """Save new resident to database and update user_type with robust notification handling."""
     if "awaiting_new_resident_phone" not in context.user_data:
         await send_and_remember(
             update,
@@ -2114,20 +2114,29 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
                 (chat_id, update.effective_user.username, full_name, SUPPORT_ROLES["user"], datetime.now(), SUPPORT_ROLES["user"], full_name),
             )
             conn.commit()
-        # Update user_type if the new resident is the current user
-        if chat_id == update.effective_user.id:
-            context.user_data["user_type"] = USER_TYPES["resident"]
+        # Update user_type for the new resident
+        context.user_data["user_type"] = USER_TYPES["resident"]
         await send_and_remember(
             update,
             context,
             f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен с ID {resident_id}.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
         )
-        # Notify the new resident
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="🏠 Вы зарегистрированы как резидент ЖК Сункар! Используйте /start для доступа к меню.",
-        )
+        # Attempt to notify the new resident, handle failure gracefully
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🏠 Вы зарегистрированы как резидент ЖК Сункар! Используйте /start для доступа к меню.",
+            )
+            logger.info(f"Successfully notified new resident (chat_id: {chat_id})")
+        except telegram.error.BadRequest as e:
+            logger.warning(f"Failed to notify new resident (chat_id: {chat_id}): {e}")
+            await send_and_remember(
+                update,
+                context,
+                f"⚠️ Не удалось уведомить резидента (chat ID: {chat_id}). Убедитесь, что пользователь запустил бота с /start.",
+                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type")),
+            )
     except psycopg2.Error as e:
         logger.error(f"Database error adding resident: {e}")
         await send_and_remember(
@@ -2143,7 +2152,7 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
         context.user_data.pop("new_resident_name", None)
         context.user_data.pop("new_resident_address", None)
         conn.close()
-
+        
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages based on context."""
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
