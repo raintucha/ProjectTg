@@ -1871,7 +1871,7 @@ async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаление резидента с улучшенной обработкой ошибок"""
+    """Удаление резидента с улучшенной обработкой ошибок и каскадным удалением."""
     try:
         chat_id = int(update.message.text.strip())
     except ValueError:
@@ -1892,34 +1892,39 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
 
             resident_id, full_name = resident
 
-            # 2. Удаляем связанные заявки (если таблица существует)
-            try:
-                cur.execute("DELETE FROM issues WHERE resident_id = %s", (resident_id,))
-                logger.info(f"Удалено заявок: {cur.rowcount}")
-            except psycopg2.Error as e:
-                logger.warning(f"Таблица issues не найдена или ошибка при удалении заявок: {e}")
+            # 2. Проверяем и логируем количество связанных заявок перед удалением
+            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
+            issue_count_before = cur.fetchone()[0]
+            logger.info(f"Найдено {issue_count_before} заявок для resident_id {resident_id} перед удалением")
 
-            # 3. Удаляем самого резидента
+            # 3. Удаляем резидента (каскадное удаление обработает issues)
             cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
-            
-            # 4. Пытаемся удалить из users (необязательно)
+            conn.commit()
+
+            # 4. Проверяем количество удалённых записей
+            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
+            issue_count_after = cur.fetchone()[0]
+            issues_deleted = issue_count_before - issue_count_after
+            logger.info(f"Удалено {issues_deleted} заявок каскадно для resident_id {resident_id}")
+
+            # 5. Пытаемся удалить из users (необязательно)
             try:
                 cur.execute("DELETE FROM users WHERE user_id = %s AND role = %s", 
                            (chat_id, SUPPORT_ROLES["user"]))
             except psycopg2.Error as e:
                 logger.warning(f"Ошибка при удалении из users: {e}")
 
-            conn.commit()  # Важно: подтверждаем изменения!
-            
-            # Успешное сообщение
+            conn.commit()  # Подтверждаем изменения
+
+            # Успешное сообщение с информацией о каскадном удалении
             await update.message.reply_text(
                 f"✅ Резидент {full_name} (ID: {chat_id}) успешно удалён.\n"
-                f"Удалено заявок: {cur.rowcount}",
+                f"Удалено заявок: {issues_deleted}",
                 reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
             )
 
     except psycopg2.Error as e:
-        logger.error(f"Database error: {e}")
+        logger.error(f"Database error: {e.pgerror if hasattr(e, 'pgerror') else str(e)}")
         await update.message.reply_text(
             f"❌ Ошибка базы данных: {e.pgerror if hasattr(e, 'pgerror') else str(e)}",
             reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
