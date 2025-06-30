@@ -500,7 +500,7 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
     else:
         keyboard = [
             [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")],
+            [InlineKeyboardButton("🛒 Зарегистрироваться как покупатель", callback_data="select_potential_buyer")],
             [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
             [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
             [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
@@ -1740,6 +1740,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
+    user_type = context.user_data.get("user_type", "unknown")
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
     try:
@@ -1780,7 +1781,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "sales_team":
             await show_sales_team(update, context)
         elif query.data == "ask_sales_question":
-            await ask_sales_question(update, context)
+            if user_type != USER_TYPES["potential_buyer"]:
+                await send_and_remember(
+                    update,
+                    context,
+                    "❌ Только потенциальные покупатели могут задавать вопросы отделу продаж. Зарегистрируйтесь как потенциальный покупатель.",
+                    main_menu_keyboard(user_id, role, user_type=user_type)
+                )
+                return
+            context.user_data["awaiting_sales_question"] = True
+            await send_and_remember(
+                update,
+                context,
+                "❓ Пожалуйста, введите ваш вопрос для отдела продаж:",
+                InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
+            )
+        elif query.data.startswith("reply_to_"):
+            target_user_id = int(query.data.replace("reply_to_", ""))
+            context.user_data["reply_to_user"] = target_user_id
+            await send_and_remember(
+                update,
+                context,
+                f"✍️ Введите ваш ответ для пользователя {target_user_id}:",
+                InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
+            )
         elif query.data == "add_resident":
             await add_resident(update, context)
         elif query.data == "delete_resident":
@@ -2105,10 +2129,10 @@ async def show_complex_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🏠 Информация о ЖК Сункар:\n\n"
         "ЖК Сункар – современный жилой комплекс с развитой инфраструктурой.\n"
-        "📍 Расположение: г. Алматы, ул. Примерная, 123\n"
+        "📍 Расположение: г. Актобе\n"
         "🌳 Особенности: зеленые зоны, детские площадки, паркинг\n"
         "🏬 Типы квартир: 1, 2, 3-комнатные\n"
-        "📞 Контакт: @SunqarSales"
+        "📞 Контакт: @ShiriOni99"
     )
     await send_and_remember(
         update,
@@ -2172,45 +2196,120 @@ async def ask_sales_question(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["awaiting_sales_question"] = True
 
 async def process_sales_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process and forward sales question to the sales team."""
+    """Handle the submission of a sales question from a potential buyer."""
     if "awaiting_sales_question" not in context.user_data:
+        return  # Ignore if not waiting for a question
+
+    question = update.message.text.strip()
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "No username"
+    full_name = update.effective_user.full_name or "Unknown"
+    timestamp = datetime.now().strftime("%H:%M %d.%m.%Y")  # Format: 07:54 30.06.2025
+
+    # Query all agents (role = 2)
+    conn = None
+    agents = []
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id FROM users WHERE role = %s", (SUPPORT_ROLES["agent"],))
+            agents = [row[0] for row in cur.fetchall()]
+    except psycopg2.Error as e:
+        logger.error(f"Database error getting agents: {e}", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+
+    # Include director if defined
+    recipients = agents + ([int(DIRECTOR_CHAT_ID)] if DIRECTOR_CHAT_ID else [])
+
+    # Format notification message
+    notification_text = (
+        f"❓ Новый вопрос от потенциального покупателя:\n"
+        f"👤 От: {full_name} (@{username})\n"
+        f"🆔 ID: {user_id}\n"
+        f"📝 Вопрос: {question}\n"
+        f"🕒 Время: {timestamp}"
+    )
+
+    # Send notification to all agents and director
+    failed_recipients = []
+    for recipient_id in recipients:
+        try:
+            await context.bot.send_message(
+                chat_id=recipient_id,
+                text=notification_text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📞 Ответить", callback_data=f"reply_to_{user_id}")]
+                ])
+            )
+            logger.info(f"Sent sales question to recipient {recipient_id}")
+        except (telegram.error.BadRequest, telegram.error.Forbidden) as e:
+            logger.warning(f"Failed to send sales question to {recipient_id}: {e}")
+            failed_recipients.append(recipient_id)
+
+    # Notify user their question was sent
+    await send_and_remember(
+        update,
+        context,
+        "✅ Ваш вопрос отправлен в отдел продаж. Ожидайте ответа!",
+        main_menu_keyboard(user_id, await get_user_role(user_id), is_in_main_menu=True, user_type=context.user_data.get("user_type")),
+    )
+
+    # Notify director about failed recipients (if any)
+    if failed_recipients and DIRECTOR_CHAT_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=DIRECTOR_CHAT_ID,
+                text=f"⚠️ Не удалось отправить вопрос следующим сотрудникам: {', '.join(map(str, failed_recipients))}. "
+                     f"Убедитесь, что они запустили бота с /start."
+            )
+        except telegram.error.TelegramError:
+            logger.error(f"Failed to notify director about failed recipients")
+
+    # Clear state
+    context.user_data.pop("awaiting_sales_question", None)
+
+async def process_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle replies from agents/directors to users."""
+    if "reply_to_user" not in context.user_data:
+        return  # Ignore if not waiting for a reply
+
+    reply_text = update.message.text.strip()
+    target_user_id = context.user_data["reply_to_user"]
+    sender_id = update.effective_user.id
+    sender_role = await get_user_role(sender_id)
+
+    if sender_role not in [SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]]:
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка: не ожидается вопрос.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+            "❌ Только сотрудники могут отправлять ответы.",
+            main_menu_keyboard(sender_id, sender_role, user_type=context.user_data.get("user_type"))
         )
         return
-    question = update.message.text
-    user = update.effective_user
+
     try:
-        # Forward question to sales team (e.g., director or sales channel)
         await context.bot.send_message(
-            chat_id=DIRECTOR_CHAT_ID,  # Or replace with a sales team chat ID
-            text=(
-                f"❓ Новый вопрос от потенциального покупателя:\n\n"
-                f"👤 От: {user.full_name} (@{user.username or 'нет'})\n"
-                f"🆔 ID: {user.id}\n"
-                f"📝 Вопрос: {question}\n"
-                f"🕒 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
-            ),
+            chat_id=target_user_id,
+            text=f"📬 Ответ от отдела продаж:\n{reply_text}"
         )
         await send_and_remember(
             update,
             context,
-            "✅ Ваш вопрос отправлен в отдел продаж! Ожидайте ответа.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+            f"✅ Ответ отправлен пользователю {target_user_id}.",
+            main_menu_keyboard(sender_id, sender_role, is_in_main_menu=True, user_type=context.user_data.get("user_type"))
         )
-    except Exception as e:
-        logger.error(f"Error forwarding sales question: {e}")
+    except (telegram.error.BadRequest, telegram.error.Forbidden) as e:
+        logger.error(f"Failed to send reply to {target_user_id}: {e}")
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка при отправке вопроса. Попробуйте позже.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["potential_buyer"]),
+            f"❌ Не удалось отправить ответ: пользователь {target_user_id} не запустил бота.",
+            main_menu_keyboard(sender_id, sender_role, is_in_main_menu=True, user_type=context.user_data.get("user_type"))
         )
-    finally:
-        context.user_data.pop("awaiting_sales_question", None)
+
+    context.user_data.pop("reply_to_user", None)
 
 async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_user.id
@@ -2736,7 +2835,9 @@ def main() -> None:
             application.add_handler(CommandHandler("clear", clear_chat))
             logger.info("✅ Registered CallbackQueryHandler for button_handler")
             application.add_handler(CallbackQueryHandler(button_handler))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data, block=False))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_sales_question, block=False))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_reply, block=False))
             application.add_error_handler(error_handler)
 
             logger.info("🚀 Starting bot polling...")
