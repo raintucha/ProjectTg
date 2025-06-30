@@ -885,7 +885,10 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     try:
         issue_id = await save_request_to_db(update, context, problem_text)
         if context.user_data["is_urgent"]:
-            await send_urgent_alert(update, context, issue_id)
+            try:
+                await send_urgent_alert(update, context, issue_id)
+            except Exception as e:
+                logger.error(f"Failed to send urgent alert for issue {issue_id}: {e}", exc_info=True)
         await send_and_remember(
             update,
             context,
@@ -904,12 +907,20 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             f"❌ Ошибка: {e}. Пожалуйста, начните процесс заново.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
+    except psycopg2.Error as e:
+        logger.error(f"Database error in process_problem_report for user {update.effective_user.id}: {e}", exc_info=True)
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Ошибка базы данных при сохранении заявки: {e}. Попробуйте позже.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
     except Exception as e:
         logger.error(f"Unexpected error in process_problem_report for user {update.effective_user.id}: {e}", exc_info=True)
         await send_and_remember(
             update,
             context,
-            "❌ Произошла ошибка при сохранении заявки. Попробуйте позже.",
+            f"❌ Произошла ошибка при сохранении заявки: {e}. Попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
 
@@ -922,6 +933,8 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     phone = context.user_data.get("user_phone", None)
     problem_text = context.user_data.get("problem_text", problem_text)
     is_urgent = context.user_data.get("is_urgent", False)
+
+    logger.info(f"Saving request for user {chat_id}: full_name={full_name}, address={address}, phone={phone}, problem_text={problem_text}, is_urgent={is_urgent}")
 
     # Validate required fields for non-admins
     if role != SUPPORT_ROLES["admin"]:
@@ -951,7 +964,7 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             type_errors.append("is_urgent должен быть булевым")
         if type_errors:
             logger.error(f"Type errors in save_request_to_db for user {chat_id}: {type_errors}")
-            raise ValueError("Ошибка в формате данных")
+            raise ValueError(f"Ошибка в формате данных: {', '.join(type_errors)}")
 
     resident_id = None
     conn = get_db_connection()
@@ -997,62 +1010,58 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     logger.info(f"Created new resident_id: {resident_id} for chat_id: {chat_id}")
 
             # Save the issue
-            cur.execute(
-                """
-                INSERT INTO issues (resident_id, chat_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING issue_id
-                """,
-                (
-                    resident_id,
-                    chat_id,
-                    problem_text,
-                    "urgent" if is_urgent else "normal",
-                    "new",
-                    datetime.now(),
-                ),
-            )
-            issue_id = cur.fetchone()[0]
-            conn.commit()
-            logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO issues (resident_id, chat_id, description, category, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING issue_id
+                    """,
+                    (
+                        resident_id,
+                        chat_id,
+                        problem_text,
+                        "urgent" if is_urgent else "normal",
+                        "new",
+                        datetime.now(),
+                    ),
+                )
+                issue_id = cur.fetchone()[0]
+                conn.commit()
+                logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
+            except psycopg2.Error as e:
+                logger.error(f"Failed to insert issue for user {chat_id}: {e}", exc_info=True)
+                raise psycopg2.Error(f"Ошибка при сохранении заявки: {e}")
 
             # Log the issue creation
-            cur.execute(
-                """
-                INSERT INTO issue_logs (issue_id, user_id, action, details, log_time)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    issue_id,
-                    chat_id,
-                    "created",
-                    f"Новая заявка от {full_name}: {problem_text}",
-                    datetime.now(),
-                ),
-            )
-            conn.commit()
-            logger.info(f"Logged issue creation for issue ID {issue_id}")
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO issue_logs (issue_id, user_id, action, details, log_time)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        issue_id,
+                        chat_id,
+                        "created",
+                        f"Новая заявка от {full_name}: {problem_text}",
+                        datetime.now(),
+                    ),
+                )
+                conn.commit()
+                logger.info(f"Logged issue creation for issue ID {issue_id}")
+            except psycopg2.Error as e:
+                logger.error(f"Failed to insert issue log for issue {issue_id}: {e}", exc_info=True)
+                raise psycopg2.Error(f"Ошибка при записи лога заявки: {e}")
 
         return issue_id
 
     except psycopg2.Error as e:
-        logger.error(f"Database error in save_request_to_db for user {chat_id}: {e}")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка базы данных при сохранении заявки. Попробуйте позже.",
-            main_menu_keyboard(chat_id, role),
-        )
+        logger.error(f"Database error in save_request_to_db for user {chat_id}: {e}", exc_info=True)
         conn.rollback()
         raise
-    except ValueError as e:
-        logger.error(f"Validation error in save_request_to_db for user {chat_id}: {e}")
-        await send_and_remember(
-            update,
-            context,
-            f"❌ Ошибка: {e}. Пожалуйста, начните процесс заново.",
-            main_menu_keyboard(chat_id, role),
-        )
+    except Exception as e:
+        logger.error(f"Unexpected error in save_request_to_db for user {chat_id}: {e}", exc_info=True)
         conn.rollback()
         raise
     finally:
@@ -1717,9 +1726,8 @@ async def send_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button callbacks."""
     query = update.callback_query
-    if query.data == "do_nothing":
-        return
     if not query:
         logger.error("No callback query received")
         return
@@ -1729,12 +1737,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
     try:
-        if query.data == "start":
+        if query.data == "do_nothing":
+            return
+        elif query.data == "start":
             await start(update, context)
         elif query.data == "register_as_resident":
-            await register_as_resident(update, context)
-        # ... (rest of the existing conditions) ...
-            await select_user_type(update, context, USER_TYPES["resident"])
+            # Clear stale user_data except user_type to prevent conflicts
+            user_type = context.user_data.get("user_type")
+            context.user_data.clear()
+            if user_type:
+                context.user_data["user_type"] = user_type
+            # Set registration flow state
+            context.user_data["registration_flow"] = True
+            context.user_data["awaiting_name"] = True
+            logger.info(f"Starting registration flow for user {user_id}")
+            await query.message.edit_text(
+                "👤 Введите ваше ФИО:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
+            )
         elif query.data == "select_potential_buyer":
             await select_user_type(update, context, USER_TYPES["potential_buyer"])
         elif query.data == "complex_info":
@@ -1804,10 +1824,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "add_agent":
             await add_agent(update, context)
         elif query.data == "cancel":
+            # Clear registration flow state on cancel
+            context.user_data.clear()
+            context.user_data["user_type"] = USER_TYPES.get("resident", "unknown")
+            logger.info(f"User {user_id} cancelled registration flow")
             await start(update, context)
         elif query.data == "back_to_main":
-            # Для админа возвращаем в админское меню с особым сообщением
-            user_type = context.user_data.get("user_type")  
+            user_type = context.user_data.get("user_type")
             if role == SUPPORT_ROLES["admin"]:
                 await send_and_remember(
                     update,
@@ -1826,7 +1849,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
             )
     except psycopg2.Error as e:
-        logger.error(f"Database error in button_handler: {e}")
+        logger.error(f"Database error in button_handler for user {user_id}: {e}", exc_info=True)
         await send_and_remember(
             update,
             context,
@@ -1834,7 +1857,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
         )
     except Exception as e:
-        logger.error(f"Unexpected error in button_handler: {e}")
+        logger.error(f"Unexpected error in button_handler for user {user_id}: {e}", exc_info=True)
         await send_and_remember(
             update,
             context,
