@@ -1009,17 +1009,16 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     conn.commit()
                     logger.info(f"Created new resident_id: {resident_id} for chat_id: {chat_id}")
 
-            # Save the issue
+            # Save the issue (removed chat_id)
             try:
                 cur.execute(
                     """
-                    INSERT INTO issues (resident_id, chat_id, description, category, status, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO issues (resident_id, description, category, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
                     RETURNING issue_id
                     """,
                     (
                         resident_id,
-                        chat_id,
                         problem_text,
                         "urgent" if is_urgent else "normal",
                         "new",
@@ -1069,24 +1068,37 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.info("Closing database connection")
             conn.close()
 
-async def send_urgent_alert(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int
-):
+from datetime import datetime, timezone, timedelta  # Add this import
+
+async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int):
     """Send urgent alert to director."""
     try:
         user = update.effective_user
+        full_name = context.user_data.get("user_name", user.full_name or "Unknown")
+        phone = context.user_data.get("user_phone", "Не указан")
+        address = context.user_data.get("user_address", "Не указан")
+        problem_text = context.user_data.get("problem_text", "Не указана")
+        timestamp = datetime.now(timezone(timedelta(hours=5))).strftime("%H:%M %d.%m.%Y")  # UTC+5
+
+        message = (
+            f"🚨 СРОЧНОЕ ОБРАЩЕНИЕ #{issue_id} 🚨\n\n"
+            f"От: {full_name} (@{user.username or 'нет'})\n"
+            f"ID: {user.id}\n"
+            f"Адрес: {address}\n"
+            f"Телефон: {phone}\n"
+            f"Проблема: {problem_text}\n"
+            f"Время: {timestamp}"
+        )
+
+        # Notify director
         await context.bot.send_message(
             chat_id=DIRECTOR_CHAT_ID,
-            text=(
-                f"🚨 СРОЧНОЕ ОБРАЩЕНИЕ #{issue_id} 🚨\n\n"
-                f"От: {user.full_name} (@{user.username or 'нет'})\n"
-                f"ID: {user.id}\n"
-                f"Проблема: {context.user_data['problem_text']}\n"
-                f"Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
-            ),
+            text=message,
         )
+        logger.info(f"Sent urgent alert to director for issue #{issue_id}")
+
     except Exception as e:
-        logger.error(f"Error sending urgent alert: {e}")
+        logger.error(f"Error sending urgent alert for issue #{issue_id}: {e}", exc_info=True)
 
 async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user full name."""
