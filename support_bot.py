@@ -49,7 +49,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Role constants
-SUPPORT_ROLES = {"user": 1, "agent": 2, "admin": 3}
+SUPPORT_ROLES = {"user": 1, "agent": 2, "admin": 3, "resident": 4}
 USER_TYPES = {"resident": "resident", "potential_buyer": "potential_buyer"}
 def init_db():
     """Initialize database tables if they don't exist."""
