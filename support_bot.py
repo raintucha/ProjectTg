@@ -57,13 +57,14 @@ def init_db():
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Создание таблицы users
+            # Создание таблицы users с user_type
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     full_name TEXT NOT NULL,
                     role INTEGER NOT NULL,
+                    user_type VARCHAR(50),  -- Added user_type column
                     registration_date TIMESTAMP NOT NULL
                 )
             """)
@@ -102,7 +103,7 @@ def init_db():
                     issue_id INTEGER NOT NULL REFERENCES issues(issue_id),
                     action TEXT NOT NULL,
                     user_id BIGINT NOT NULL REFERENCES users(user_id),
-                    details TEXT,  -- Добавляем столбец details
+                    details TEXT,
                     action_time TIMESTAMP NOT NULL
                 )
             """)
@@ -128,7 +129,7 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         raise
 
-async def get_user_role(user_id: int) -> str:
+async def get_user_role(user_id: int) -> int:  # Changed return type to int
     """Retrieve user role from database."""
     if str(user_id) == DIRECTOR_CHAT_ID:
         conn = None
@@ -137,11 +138,11 @@ async def get_user_role(user_id: int) -> str:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO users (user_id, username, full_name, role, registration_date, user_type)
+                    INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (user_id) DO NOTHING
                     """,
-                    (user_id, None, "Director", SUPPORT_ROLES["admin"], datetime.now(), USER_TYPES["resident"])
+                    (user_id, None, "Director", SUPPORT_ROLES["admin"], "resident", datetime.now())
                 )
                 conn.commit()
                 logger.info(f"Auto-registered director {user_id} as admin")
@@ -160,11 +161,11 @@ async def get_user_role(user_id: int) -> str:
             cur.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
             if result:
-                return result[0]
-            return SUPPORT_ROLES.get("unknown", "unknown")
+                return result[0]  # Return role as integer
+            return SUPPORT_ROLES["user"]  # Default to user role (1)
     except psycopg2.Error as e:
         logger.error(f"Database error getting role for user_id {user_id}: {e}", exc_info=True)
-        return SUPPORT_ROLES.get("unknown", "unknown")
+        return SUPPORT_ROLES["user"]
     finally:
         if conn:
             conn.close()
@@ -468,7 +469,7 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             conn.close()
 
-def main_menu_keyboard(user_id: int, role: str, is_in_main_menu: bool = False, user_type: str = None) -> InlineKeyboardMarkup:
+def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, user_type: str = None) -> InlineKeyboardMarkup:  # Changed role to int
     """Generate the main menu keyboard based on user role."""
     keyboard = []
     
@@ -510,6 +511,7 @@ def main_menu_keyboard(user_id: int, role: str, is_in_main_menu: bool = False, u
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
     
     return InlineKeyboardMarkup(keyboard)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /start command and show appropriate menu."""
     chat_id = update.effective_user.id
@@ -584,14 +586,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["user_type"] = USER_TYPES["resident"]
+    context.user_data["registration_flow"] = True
+    context.user_data["awaiting_name"] = True
+    
+    # Update role to resident in users table
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users SET role = %s, user_type = %s
+                WHERE user_id = %s
+                """,
+                (SUPPORT_ROLES["resident"], USER_TYPES["resident"], update.effective_user.id)
+            )
+            conn.commit()
+            logger.info(f"Set role to resident and user_type to resident for user {update.effective_user.id}")
+    except psycopg2.Error as e:
+        logger.error(f"Database error updating role for user {update.effective_user.id}: {e}", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+    
     await send_and_remember(
         update,
         context,
         "👤 Введите ваше ФИО для регистрации:",
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
     )
-    context.user_data["awaiting_name"] = True
-    context.user_data["registration_flow"] = True
 
 async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
     """Set the user type and show the main menu."""
@@ -2485,11 +2508,16 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
             username = update.effective_user.username if update.effective_user.username else None
             cur.execute(
                 """
-                INSERT INTO users (user_id, username, full_name, role, registration_date)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE 
+                SET username = EXCLUDED.username, 
+                    full_name = EXCLUDED.full_name, 
+                    role = EXCLUDED.role, 
+                    user_type = EXCLUDED.user_type,
+                    registration_date = EXCLUDED.registration_date
                 """,
-                (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                (chat_id, username, full_name, SUPPORT_ROLES["resident"], USER_TYPES["resident"], datetime.now()),
             )
             conn.commit()
 
@@ -2604,6 +2632,8 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
     error = context.error
+    logger.error("Exception occurred:", exc_info=error)
+    
     if isinstance(error, (NetworkError, TimedOut)):
         logger.warning(f"⚠️ Network error occurred: {error}. Attempting to reconnect...")
         if update and update.effective_user:
@@ -2611,16 +2641,27 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update,
                 context,
                 "⚠️ Проблема с сетью. Пожалуйста, попробуйте позже.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
             )
         return
-    logger.error("Exception occurred:", exc_info=context.error)
+    
+    if isinstance(error, KeyError) and "resident" in str(error):
+        logger.error(f"KeyError: 'resident' not found in SUPPORT_ROLES, user_id: {update.effective_user.id if update else 'unknown'}")
+        if update and update.effective_user:
+            await send_and_remember(
+                update,
+                context,
+                "❌ Ошибка: роль 'resident' не определена. Пожалуйста, свяжитесь с администратором.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="start")]])
+            )
+        return
+    
     if update and update.effective_user:
         await send_and_remember(
             update,
             context,
             "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в техподдержку.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
