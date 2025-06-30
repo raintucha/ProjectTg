@@ -2156,91 +2156,111 @@ async def process_sales_question(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop("awaiting_sales_question", None)
 
 async def delete_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Prompt admin to enter chat ID of resident to delete."""
-    user_id = update.effective_user.id
-    role = await get_user_role(user_id)
-    if role != SUPPORT_ROLES["admin"] and user_id != DIRECTOR_CHAT_ID:
-        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+    chat_id = update.effective_user.id
+    role = await get_user_role(chat_id)
+    if role != SUPPORT_ROLES["admin"]:
+        await update.callback_query.answer("❌ Только администраторы могут удалять резидентов.", show_alert=True)
         return
+
+    # Clear any conflicting states to avoid routing to wrong handlers
+    context.user_data.clear()
+    context.user_data["awaiting_resident_id_delete"] = True
+    logger.info(f"User {chat_id} initiated resident deletion, set state: awaiting_resident_id_delete")
+
     await send_and_remember(
         update,
         context,
         "🗑 Введите chat ID резидента для удаления:",
-        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
     )
-    context.user_data["awaiting_resident_id_delete"] = True
 
 async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление резидента с улучшенной обработкой ошибок и каскадным удалением."""
+    if "awaiting_resident_id_delete" not in context.user_data:
+        logger.warning(f"No awaiting_resident_id_delete state for user {update.effective_user.id}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается ввод chat ID для удаления.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+        return
+
+    chat_id_input = update.message.text.strip()
+    logger.info(f"Received chat_id input for deletion: '{chat_id_input}' from user {update.effective_user.id}")
+
     try:
-        chat_id = int(update.message.text.strip())
+        resident_chat_id = int(chat_id_input)  # Define resident_chat_id here
     except ValueError:
-        await update.message.reply_text("❌ Неверный формат ID. Введите числовой chat ID.")
+        logger.error(f"Invalid chat_id format: '{chat_id_input}'")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Неверный формат chat ID. Введите числовой ID (например, 123456789).",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
+        )
         return
 
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # 1. Проверяем существование резидента
-            cur.execute("SELECT resident_id, full_name FROM residents WHERE chat_id = %s", (chat_id,))
+            # Check if resident exists
+            cur.execute("SELECT resident_id, full_name FROM residents WHERE chat_id = %s", (resident_chat_id,))
             resident = cur.fetchone()
-            
             if not resident:
-                await update.message.reply_text(f"❌ Резидент с chat ID {chat_id} не найден.")
+                logger.info(f"No resident found with chat_id {resident_chat_id}")
+                await send_and_remember(
+                    update,
+                    context,
+                    f"❌ Резидент с chat ID {resident_chat_id} не найден.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+                )
                 return
 
             resident_id, full_name = resident
-
-            # 2. Проверяем количество связанных заявок и логов перед удалением
+            # Count related issues and logs for logging
             cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
-            issue_count_before = cur.fetchone()[0]
+            issue_count = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
-            log_count_before = cur.fetchone()[0]
-            logger.info(f"Найдено {issue_count_before} заявок и {log_count_before} логов для resident_id {resident_id} перед удалением")
+            log_count = cur.fetchone()[0]
 
-            # 3. Удаляем резидента (каскадное удаление обработает issues и issue_logs)
-            cur.execute("DELETE FROM residents WHERE resident_id = %s", (resident_id,))
+            # Delete resident (cascades to issues and issue_logs)
+            cur.execute("DELETE FROM residents WHERE chat_id = %s", (resident_chat_id,))
+            # Delete user from users table
+            cur.execute("DELETE FROM users WHERE user_id = %s", (resident_chat_id,))
             conn.commit()
 
-            # 4. Удаляем запись из users независимо от роли
-            cur.execute("DELETE FROM users WHERE user_id = %s", (chat_id,))
-            conn.commit()
-
-            # 5. Проверяем количество оставшихся записей после каскада
-            cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
-            issue_count_after = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
-            log_count_after = cur.fetchone()[0]
-            issues_deleted = issue_count_before - issue_count_after
-            logs_deleted = log_count_before - log_count_after
-            logger.info(f"Удалено {issues_deleted} заявок и {logs_deleted} логов каскадно для resident_id {resident_id}")
-
-            # Успешное сообщение с информацией о каскадном удалении
-            await update.message.reply_text(
-                f"✅ Резидент {full_name} (ID: {chat_id}) успешно удалён.\n"
-                f"Удалено заявок: {issues_deleted}, логов: {logs_deleted}",
-                reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+            logger.info(f"Admin {update.effective_user.id} deleted resident {resident_chat_id} (resident_id: {resident_id}) with {issue_count} issues and {log_count} logs")
+            await send_and_remember(
+                update,
+                context,
+                f"✅ Резидент {full_name} (chat ID: {resident_chat_id}) успешно удалён.\n"
+                f"Удалено заявок: {issue_count}, логов: {log_count}",
+                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
             )
-
     except psycopg2.Error as e:
-        logger.error(f"Database error: {e.pgerror if hasattr(e, 'pgerror') else str(e)}")
-        await update.message.reply_text(
-            f"❌ Ошибка базы данных: {e.pgerror if hasattr(e, 'pgerror') else str(e)}",
-            reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-        )
+        logger.error(f"Database error deleting resident {resident_chat_id}: {e}", exc_info=True)
         if conn:
             conn.rollback()
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Ошибка базы данных при удалении резидента: {e}",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        await update.message.reply_text(
-            f"❌ Непредвиденная ошибка: {str(e)}",
-            reply_markup=main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        logger.error(f"Unexpected error deleting resident {resident_chat_id}: {e}", exc_info=True)
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Непредвиденная ошибка: {e}",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
     finally:
+        context.user_data.clear()  # Clear all states after completion
         if conn:
             conn.close()
-        context.user_data.pop("awaiting_resident_id_delete", None)
         
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
@@ -2482,20 +2502,40 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
     logger.info(f"Current context.user_data: {context.user_data}")
 
-    # List of valid states
+    # List of valid states with priority for deletion
     valid_states = [
-        "awaiting_problem", "awaiting_name", "awaiting_address", "awaiting_phone",
-        "awaiting_solution", "awaiting_agent_id", "awaiting_agent_name",
-        "awaiting_user_message", "awaiting_sales_question", "awaiting_resident_id_delete",
-        "awaiting_resident_id_add", "awaiting_new_resident_name",
-        "awaiting_new_resident_address", "awaiting_new_resident_phone"
+        "awaiting_resident_id_delete",  # Prioritize deletion
+        "awaiting_resident_id_add",
+        "awaiting_new_resident_name",
+        "awaiting_new_resident_address",
+        "awaiting_new_resident_phone",
+        "awaiting_problem",
+        "awaiting_name",
+        "awaiting_address",
+        "awaiting_phone",
+        "awaiting_solution",
+        "awaiting_agent_id",
+        "awaiting_agent_name",
+        "awaiting_user_message",
+        "awaiting_sales_question"
     ]
 
-    # Check if any valid state is active
+    # Check for active state
     active_state = next((state for state in valid_states if state in context.user_data), None)
+    logger.info(f"Active state selected: {active_state} for user {update.effective_user.id}")
 
     if active_state:
-        if active_state == "awaiting_problem":
+        if active_state == "awaiting_resident_id_delete":
+            await process_resident_delete(update, context)
+        elif active_state == "awaiting_resident_id_add":
+            await process_resident_id_add(update, context)
+        elif active_state == "awaiting_new_resident_name":
+            await process_new_resident_name(update, context)
+        elif active_state == "awaiting_new_resident_address":
+            await process_new_resident_address(update, context)
+        elif active_state == "awaiting_new_resident_phone":
+            await process_new_resident_phone(update, context)
+        elif active_state == "awaiting_problem":
             await process_problem_report(update, context)
         elif active_state == "awaiting_name":
             await process_user_name(update, context)
@@ -2513,16 +2553,6 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_user_message(update, context)
         elif active_state == "awaiting_sales_question":
             await process_sales_question(update, context)
-        elif active_state == "awaiting_resident_id_delete":
-            await process_resident_delete(update, context)
-        elif active_state == "awaiting_resident_id_add":
-            await process_resident_id_add(update, context)
-        elif active_state == "awaiting_new_resident_name":
-            await process_new_resident_name(update, context)
-        elif active_state == "awaiting_new_resident_address":
-            await process_new_resident_address(update, context)
-        elif active_state == "awaiting_new_resident_phone":
-            await process_new_resident_phone(update, context)
     else:
         logger.warning(f"No awaiting state for user {update.effective_user.id}")
         context.user_data.clear()  # Clear any stale state
