@@ -351,20 +351,16 @@ async def process_report_period(
     await generate_and_send_report(update, context, start_date, end_date)
 
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process user phone and save resident data with comprehensive validation."""
-    phone = update.message.text.strip()
-    logger.info(f"Received phone input for user {update.effective_user.id}: {phone}")
-    phone_pattern = re.compile(r"^\+?\d{7,15}$")
-    if not phone_pattern.match(phone):
-        logger.warning(f"Invalid phone format: {phone}")
+    if not context.user_data.get("registration_flow"):
+        logger.warning(f"User {update.effective_user.id} sent phone number outside registration flow")
         await send_and_remember(
             update,
             context,
-            "❌ Неверный формат телефона. Пожалуйста, введите корректный номер (например, +71234567890):",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+            "❌ Ошибка: вы не в процессе регистрации. Используйте /start.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         return
-
+    # ... (rest of the function remains unchanged)
     phone = re.sub(r"[^\d+]", "", phone)
     
     conn = None
@@ -671,7 +667,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
 async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start resident registration process."""
+    context.user_data["user_type"] = USER_TYPES["resident"]
     await send_and_remember(
         update,
         context,
@@ -679,7 +675,7 @@ async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYP
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
     )
     context.user_data["awaiting_name"] = True
-    context.user_data["registration_flow"] = True  # Mark as registration flow
+    context.user_data["registration_flow"] = True
 
 async def select_user_type(update: Update, context: ContextTypes.DEFAULT_TYPE, user_type: str):
     """Set the user type and show the main menu."""
@@ -1014,7 +1010,7 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     logger.info(f"Attempting to save request. Resident ID: {resident_id}")
     logger.info(f"Context data: {context.user_data}")
     user_id = update.effective_user.id
-    
+    conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -1027,27 +1023,47 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     """
                     INSERT INTO users (user_id, username, full_name, role, registration_date)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
                     """,
                     (user_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
                 )
                 conn.commit()
                 logger.info(f"Auto-registered user {user_id} in users table")
 
+            # If resident_id is None (admin case), create a temporary resident
+            if resident_id is None:
+                full_name = update.effective_user.full_name or "Admin User"
+                address = "Admin Address"
+                phone = "N/A"
+                cur.execute(
+                    """
+                    INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING resident_id
+                    """,
+                    (user_id, full_name, address, phone, datetime.now()),
+                )
+                resident_id = cur.fetchone()[0]
+                logger.info(f"Created temporary resident ID {resident_id} for admin {user_id}")
+
+            # Validate resident_id
             cur.execute("SELECT 1 FROM residents WHERE resident_id = %s", (resident_id,))
             if not cur.fetchone():
                 logger.error(f"Resident {resident_id} not found in database")
                 raise ValueError(f"Resident {resident_id} not found")
-            
+
+            # Validate required fields
             required_fields = ['problem_text', 'is_urgent']
             for field in required_fields:
                 if field not in context.user_data:
                     logger.error(f"Missing required field: {field}")
                     raise ValueError(f"Missing {field}")
-            
+
+            # Insert issue
             cur.execute(
-                """INSERT INTO issues (resident_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, %s, %s) RETURNING issue_id""",
+                """
+                INSERT INTO issues (resident_id, description, category, status, created_at)
+                VALUES (%s, %s, %s, %s, %s) RETURNING issue_id
+                """,
                 (
                     resident_id,
                     context.user_data["problem_text"],
@@ -1058,7 +1074,7 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             issue_id = cur.fetchone()[0]
 
-            # Log the issue creation
+            # Log issue creation
             cur.execute(
                 """
                 INSERT INTO issue_logs (issue_id, action, user_id, action_time)
@@ -1067,10 +1083,9 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 (issue_id, user_id)
             )
             conn.commit()
-            
             logger.info(f"Successfully saved issue #{issue_id} with log")
             return issue_id
-            
+
     except psycopg2.IntegrityError as e:
         logger.error(f"Integrity error: {e}")
         raise ValueError("Database integrity error") from e
@@ -1696,7 +1711,6 @@ async def send_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks."""
     query = update.callback_query
     if query.data == "do_nothing":
         return
@@ -1707,11 +1721,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
     logger.info(f"Processing button: {query.data} for user {user_id}")
-    
+
     try:
         if query.data == "start":
             await start(update, context)
-        elif query.data == "select_resident":
+        elif query.data == "register_as_resident":
+            await register_as_resident(update, context)
+        # ... (rest of the existing conditions) ...
             await select_user_type(update, context, USER_TYPES["resident"])
         elif query.data == "select_potential_buyer":
             await select_user_type(update, context, USER_TYPES["potential_buyer"])
@@ -2431,57 +2447,57 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
         conn.close()
 
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages based on context."""
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
     logger.info(f"Current context.user_data: {context.user_data}")
-    if "awaiting_problem" in context.user_data:
-        logger.info(f"Processing problem report for user {update.effective_user.id}")
-        await process_problem_report(update, context)
-    elif "awaiting_name" in context.user_data:
-        logger.info(f"Processing name for user {update.effective_user.id}")
-        await process_user_name(update, context)
-    elif "awaiting_address" in context.user_data:
-        logger.info(f"Processing address for user {update.effective_user.id}")
-        await process_user_address(update, context)
-    elif "awaiting_phone" in context.user_data:
-        logger.info(f"Processing phone for user {update.effective_user.id}")
-        await process_user_phone(update, context)
-    elif "awaiting_solution" in context.user_data:
-        logger.info(f"Processing solution for user {update.effective_user.id}")
-        await save_solution(update, context)
-    elif "awaiting_agent_id" in context.user_data:
-        logger.info(f"Processing agent ID for user {update.effective_user.id}")
-        await process_new_agent(update, context)
-    elif "awaiting_agent_name" in context.user_data:
-        logger.info(f"Processing agent name for user {update.effective_user.id}")
-        await save_agent(update, context)
-    elif "awaiting_user_message" in context.user_data:
-        logger.info(f"Processing user message for user {update.effective_user.id}")
-        await send_user_message(update, context)
-    elif "awaiting_sales_question" in context.user_data:
-        logger.info(f"Processing sales question for user {update.effective_user.id}")
-        await process_sales_question(update, context)
-    elif "awaiting_resident_id_delete" in context.user_data:
-        logger.info(f"Processing resident deletion for user {update.effective_user.id}")
-        await process_resident_delete(update, context)
-    elif "awaiting_resident_id_add" in context.user_data:
-        logger.info(f"Processing new resident ID for user {update.effective_user.id}")
-        await process_resident_id_add(update, context)
-    elif "awaiting_new_resident_name" in context.user_data:
-        logger.info(f"Processing new resident name for user {update.effective_user.id}")
-        await process_new_resident_name(update, context)
-    elif "awaiting_new_resident_address" in context.user_data:
-        logger.info(f"Processing new resident address for user {update.effective_user.id}")
-        await process_new_resident_address(update, context)
-    elif "awaiting_new_resident_phone" in context.user_data:
-        logger.info(f"Processing new resident phone for user {update.effective_user.id}")
-        await process_new_resident_phone(update, context)
+
+    # List of valid states
+    valid_states = [
+        "awaiting_problem", "awaiting_name", "awaiting_address", "awaiting_phone",
+        "awaiting_solution", "awaiting_agent_id", "awaiting_agent_name",
+        "awaiting_user_message", "awaiting_sales_question", "awaiting_resident_id_delete",
+        "awaiting_resident_id_add", "awaiting_new_resident_name",
+        "awaiting_new_resident_address", "awaiting_new_resident_phone"
+    ]
+
+    # Check if any valid state is active
+    active_state = next((state for state in valid_states if state in context.user_data), None)
+
+    if active_state:
+        if active_state == "awaiting_problem":
+            await process_problem_report(update, context)
+        elif active_state == "awaiting_name":
+            await process_user_name(update, context)
+        elif active_state == "awaiting_address":
+            await process_user_address(update, context)
+        elif active_state == "awaiting_phone":
+            await process_user_phone(update, context)
+        elif active_state == "awaiting_solution":
+            await save_solution(update, context)
+        elif active_state == "awaiting_agent_id":
+            await process_new_agent(update, context)
+        elif active_state == "awaiting_agent_name":
+            await save_agent(update, context)
+        elif active_state == "awaiting_user_message":
+            await send_user_message(update, context)
+        elif active_state == "awaiting_sales_question":
+            await process_sales_question(update, context)
+        elif active_state == "awaiting_resident_id_delete":
+            await process_resident_delete(update, context)
+        elif active_state == "awaiting_resident_id_add":
+            await process_resident_id_add(update, context)
+        elif active_state == "awaiting_new_resident_name":
+            await process_new_resident_name(update, context)
+        elif active_state == "awaiting_new_resident_address":
+            await process_new_resident_address(update, context)
+        elif active_state == "awaiting_new_resident_phone":
+            await process_new_resident_phone(update, context)
     else:
         logger.warning(f"No awaiting state for user {update.effective_user.id}")
+        context.user_data.clear()  # Clear any stale state
         await send_and_remember(
             update,
             context,
-            "⚠️ Неизвестная команда. Используйте кнопки меню.",
+            "⚠️ Неизвестная команда. Используйте кнопки меню или /start.",
             main_menu_keyboard(
                 update.effective_user.id,
                 await get_user_role(update.effective_user.id),
