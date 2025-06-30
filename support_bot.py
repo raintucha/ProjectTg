@@ -128,35 +128,43 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         raise
 
-async def get_user_role(user_id: int) -> int:
-    """Retrieve user role from database, ensuring user exists."""
-    if user_id == DIRECTOR_CHAT_ID:
-        return SUPPORT_ROLES["admin"]
+async def get_user_role(user_id: int) -> str:
+    """Retrieve user role from database."""
+    if str(user_id) == DIRECTOR_CHAT_ID:
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, registration_date, user_type)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    (user_id, None, "Director", SUPPORT_ROLES["admin"], datetime.now(), USER_TYPES["resident"])
+                )
+                conn.commit()
+                logger.info(f"Auto-registered director {user_id} as admin")
+                return SUPPORT_ROLES["admin"]
+        except psycopg2.Error as e:
+            logger.error(f"Database error auto-registering director {user_id}: {e}", exc_info=True)
+            return SUPPORT_ROLES["admin"]
+        finally:
+            if conn:
+                conn.close()
+
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
-            if not result:
-                # Auto-register if not found
-                username = None  # Adjust based on context if needed
-                full_name = "Unknown"  # Default name
-                cur.execute(
-                    """
-                    INSERT INTO users (user_id, username, full_name, role, registration_date)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
-                    """,
-                    (user_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
-                )
-                conn.commit()
-                logger.info(f"Auto-registered user {user_id} in get_user_role")
-                return SUPPORT_ROLES["user"]
-            return result[0]
+            if result:
+                return result[0]
+            return SUPPORT_ROLES.get("unknown", "unknown")
     except psycopg2.Error as e:
-        logger.error(f"Error retrieving user role: {e}")
-        return SUPPORT_ROLES["user"]
+        logger.error(f"Database error getting role for user_id {user_id}: {e}", exc_info=True)
+        return SUPPORT_ROLES.get("unknown", "unknown")
     finally:
         if conn:
             conn.close()
@@ -460,146 +468,119 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             conn.close()
 
-def main_menu_keyboard(user_id, role, is_in_main_menu=False, user_type=None):
-    """Generate main menu keyboard based on user role and type."""
+def main_menu_keyboard(user_id: int, role: str, is_in_main_menu: bool = False, user_type: str = None) -> InlineKeyboardMarkup:
+    """Generate the main menu keyboard based on user role."""
     keyboard = []
     
-    # Check if user is a resident
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM residents WHERE chat_id = %s", (user_id,))
-            is_resident = cur.fetchone() is not None
-            
-        if user_type == USER_TYPES["potential_buyer"]:
-            keyboard = [
-                [InlineKeyboardButton("🏠 Информация о ЖК", callback_data="complex_info")],
-                [InlineKeyboardButton("💰 Цена за м²", callback_data="pricing_info")],
-                [InlineKeyboardButton("👥 Отдел продаж", callback_data="sales_team")]
-            ]
-        elif is_resident or role == SUPPORT_ROLES["user"]:
-            keyboard = [
-                [InlineKeyboardButton("➕ Новая заявка", callback_data="new_request")],
-                [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
-                [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
-            ]
-        elif role == SUPPORT_ROLES["agent"]:
-            keyboard = [
-                [InlineKeyboardButton("📋 Активные заявки", callback_data="active_requests")],
-                [InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")],
-                [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
-            ]
-        elif role == SUPPORT_ROLES["admin"]:
-            keyboard = [
-                [InlineKeyboardButton("📋 Активные заявки", callback_data="active_requests")],
-                [InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")],
-                [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
-                [InlineKeyboardButton("➕ Добавить резидента", callback_data="add_resident")],
-                [InlineKeyboardButton("🗑 Удалить резидента", callback_data="delete_resident")],
-                [InlineKeyboardButton("👥 Управление сотрудниками", callback_data="manage_agents")],
-                [InlineKeyboardButton("📊 Отчеты", callback_data="reports_menu")],
-                [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")],
-                [InlineKeyboardButton("🛑 Остановить бота", callback_data="shutdown_bot")]
-            ]
-    except psycopg2.Error as e:
-        logger.error(f"Database error in main_menu_keyboard: {e}")
+    if role == SUPPORT_ROLES["admin"]:
         keyboard = [
-            [InlineKeyboardButton("➕ Новая заявка", callback_data="new_request")],
+            [InlineKeyboardButton("📝 Добавить резидента", callback_data="add_resident")],
+            [InlineKeyboardButton("🗑 Удалить резидента", callback_data="delete_resident")],
+            [InlineKeyboardButton("👷 Управление сотрудниками", callback_data="manage_agents")],
+            [InlineKeyboardButton("📊 Отчеты", callback_data="reports_menu")],
+            [InlineKeyboardButton("🔔 Активные заявки", callback_data="active_requests")],
+            [InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")],
+            [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
+            [InlineKeyboardButton("🛑 Остановить бота", callback_data="shutdown_bot")]
+        ]
+    elif role == SUPPORT_ROLES["agent"]:
+        keyboard = [
+            [InlineKeyboardButton("🔔 Активные заявки", callback_data="active_requests")],
+            [InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")],
+            [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
             [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
         ]
+    elif role == SUPPORT_ROLES["resident"]:
+        keyboard = [
+            [InlineKeyboardButton("📝 Новая заявка", callback_data="new_request")],
+            [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
+            [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
+        ]
+    else:
+        keyboard = [
+            [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
+            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")],
+            [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
+            [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
+            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
+            [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
+        ]
+
+    if not is_in_main_menu:
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+    
+    return InlineKeyboardMarkup(keyboard)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command and show appropriate menu."""
+    chat_id = update.effective_user.id
+    role = await get_user_role(chat_id)
+    logger.info(f"User {chat_id} started bot, role: {role}")
+
+    # Clear any existing states to avoid conflicts
+    context.user_data.clear()
+
+    # Retrieve user_type
+    conn = None
+    user_type = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_type FROM users WHERE user_id = %s", (chat_id,))
+            result = cur.fetchone()
+            user_type = result[0] if result else None
+    except psycopg2.Error as e:
+        logger.error(f"Database error checking user_type for {chat_id}: {e}", exc_info=True)
     finally:
         if conn:
             conn.close()
 
-    # Кнопка возврата/главного меню
-    btn = InlineKeyboardButton("🔙 Главное меню", callback_data="start")
-    if is_in_main_menu:
-        btn = InlineKeyboardButton("📍 Вы в главном меню", callback_data="do_nothing")
-    keyboard.append([btn])
-    
-    return InlineKeyboardMarkup(keyboard)
+    context.user_data["user_type"] = user_type or "unknown"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command and register user if they are a resident."""
-    chat_id = update.effective_user.id
-    full_name = update.effective_user.full_name or "Unknown"
-    username = update.effective_user.username
-    role = await get_user_role(chat_id)
-    
-    # Preserve user_type if it exists
-    user_type = context.user_data.get("user_type")
-    
-    # Clear any existing user data except user_type
-    for key in list(context.user_data.keys()):
-        if key != "user_type":
-            del context.user_data[key]
-    
-    if role == SUPPORT_ROLES["admin"]:
-        text = "👑 Добро пожаловать, администратор!"
-        reply_markup = main_menu_keyboard(chat_id, role, is_in_main_menu=True)
-        if update.message:
-            await update.message.reply_text(text, reply_markup=reply_markup)
-        elif update.callback_query:
-            await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
-        return
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            # Check if the user is a resident
-            cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
-            resident = cur.fetchone()
-            
-            if resident:
-                resident_id = resident[0]
-                # Update user info if needed
-                cur.execute(
-                    """
-                    INSERT INTO users (user_id, username, full_name, role, registration_date)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
-                    """,
-                    (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
-                )
-                conn.commit()
-                text = "🏠 Добро пожаловать обратно!"
-                reply_markup = main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
-                if update.message:
-                    await update.message.reply_text(text, reply_markup=reply_markup)
-                elif update.callback_query:
-                    await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
-            else:
-                # If user_type is already set (e.g., potential_buyer), show appropriate menu
-                if user_type == USER_TYPES["potential_buyer"]:
-                    text = "🏠 Вы вошли как потенциальный покупатель.\n\nВыберите действие:"
-                    reply_markup = main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
-                    if update.message:
-                        await update.message.reply_text(text, reply_markup=reply_markup)
-                    elif update.callback_query:
-                        await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
-                else:
-                    # Offer registration options
-                    keyboard = [
-                        [InlineKeyboardButton("📝 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-                        [InlineKeyboardButton("ℹ️ Я потенциальный покупатель", callback_data="select_potential_buyer")]
-                    ]
-                    text = "👋 Добро пожаловать! Выберите ваш статус:"
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    if update.message:
-                        await update.message.reply_text(text, reply_markup=reply_markup)
-                    elif update.callback_query:
-                        await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
-    except psycopg2.Error as e:
-        logger.error(f"Database error in /start: {e}")
-        text = "❌ Ошибка базы данных. Попробуйте позже."
-        reply_markup = main_menu_keyboard(chat_id, role, user_type=user_type)
-        if update.message:
-            await update.message.reply_text(text, reply_markup=reply_markup)
-        elif update.callback_query:
-            await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
-        conn.rollback()
-    finally:
-        conn.close()
+    # If user is an agent, show "Я сотрудник" button
+    if role == SUPPORT_ROLES["agent"]:
+        keyboard = [
+            [InlineKeyboardButton("👷 Я сотрудник", callback_data="select_agent")],
+            [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
+            [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
+            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
+            [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
+        ]
+        await send_and_remember(
+            update,
+            context,
+            "👷 Добро пожаловать! Вы зарегистрированы как сотрудник. Нажмите 'Я сотрудник', чтобы перейти в панель сотрудника.",
+            InlineKeyboardMarkup(keyboard)
+        )
+    elif role == SUPPORT_ROLES["admin"]:
+        await send_and_remember(
+            update,
+            context,
+            "👑 Административное меню:",
+            main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+        )
+    elif role == SUPPORT_ROLES["resident"]:
+        await send_and_remember(
+            update,
+            context,
+            "🏠 Добро пожаловать, резидент!",
+            main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+        )
+    else:
+        # Unregistered user
+        keyboard = [
+            [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
+            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")],
+            [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
+            [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
+            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
+            [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
+        ]
+        await send_and_remember(
+            update,
+            context,
+            "👋 Добро пожаловать! Пожалуйста, выберите действие:",
+            InlineKeyboardMarkup(keyboard)
+        )
 
 async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["user_type"] = USER_TYPES["resident"]
@@ -1743,13 +1724,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         elif query.data == "start":
             await start(update, context)
+        elif query.data == "select_agent":
+            if role == SUPPORT_ROLES["agent"]:
+                await send_and_remember(
+                    update,
+                    context,
+                    "👷 Панель сотрудника:",
+                    main_menu_keyboard(user_id, role, is_in_main_menu=True)
+                )
+            else:
+                await send_and_remember(
+                    update,
+                    context,
+                    "❌ Вы не зарегистрированы как сотрудник.",
+                    main_menu_keyboard(user_id, role)
+                )
         elif query.data == "register_as_resident":
-            # Clear stale user_data except user_type to prevent conflicts
-            user_type = context.user_data.get("user_type")
             context.user_data.clear()
-            if user_type:
-                context.user_data["user_type"] = user_type
-            # Set registration flow state
             context.user_data["registration_flow"] = True
             context.user_data["awaiting_name"] = True
             logger.info(f"Starting registration flow for user {user_id}")
@@ -1790,13 +1781,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 [InlineKeyboardButton("📅 Последние 7 дней", callback_data="report_7")],
                 [InlineKeyboardButton("📅 Последние 30 дней", callback_data="report_30")],
                 [InlineKeyboardButton("📅 Текущий месяц", callback_data="report_month")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
             ]
             await send_and_remember(
                 update,
                 context,
                 "📊 Выберите период отчета:",
-                InlineKeyboardMarkup(keyboard),
+                InlineKeyboardMarkup(keyboard)
             )
         elif query.data == "manage_agents":
             await manage_agents_menu(update, context)
@@ -1825,30 +1816,73 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await delete_agent(update, context, user_id)
         elif query.data == "add_agent":
             await add_agent(update, context)
-        elif query.data == "cancel":
-            # Clear registration flow state on cancel
-            context.user_data.clear()
-            context.user_data["user_type"] = USER_TYPES.get("resident", "unknown")
-            logger.info(f"User {user_id} cancelled registration flow")
-            await start(update, context)
-        elif query.data == "back_to_main":
-            user_type = context.user_data.get("user_type")
-            if role == SUPPORT_ROLES["admin"]:
+        elif query.data.startswith("confirm_delete_"):
+            resident_chat_id = int(query.data.split("_")[2])
+            if "resident_to_delete" in context.user_data and context.user_data["resident_to_delete"]["chat_id"] == resident_chat_id:
+                full_name = context.user_data["resident_to_delete"]["full_name"]
+                resident_id = context.user_data["resident_to_delete"]["resident_id"]
+                conn = None
+                try:
+                    conn = get_db_connection()
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
+                        issue_count = cur.fetchone()[0]
+                        cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
+                        log_count = cur.fetchone()[0]
+                        cur.execute("DELETE FROM residents WHERE chat_id = %s", (resident_chat_id,))
+                        cur.execute("DELETE FROM users WHERE user_id = %s", (resident_chat_id,))
+                        conn.commit()
+                        await send_and_remember(
+                            update,
+                            context,
+                            f"✅ Резидент {full_name} (chat ID: {resident_chat_id}) успешно удалён.\n"
+                            f"Удалено заявок: {issue_count}, логов: {log_count}",
+                            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+                        )
+                        logger.info(f"Admin {update.effective_user.id} deleted resident {resident_chat_id} (resident_id: {resident_id})")
+                except psycopg2.Error as e:
+                    logger.error(f"Database error deleting resident {resident_chat_id}: {e}", exc_info=True)
+                    if conn:
+                        conn.rollback()
+                    await send_and_remember(
+                        update,
+                        context,
+                        f"❌ Ошибка базы данных при удалении резидента: {e}",
+                        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+                    )
+                finally:
+                    context.user_data.clear()
+                    if conn:
+                        conn.close()
+            else:
                 await send_and_remember(
                     update,
                     context,
-                    "👑 Административное меню:",
-                    main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
+                    "❌ Ошибка: данные для удаления не найдены.",
+                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
                 )
-            else:
-                await start(update, context)
+        elif query.data == "cancel":
+            context.user_data.clear()
+            context.user_data["user_type"] = USER_TYPES.get("resident", "unknown")
+            logger.info(f"User {user_id} cancelled action")
+            await start(update, context)
+        elif query.data == "back_to_main":
+            user_type = context.user_data.get("user_type")
+            await send_and_remember(
+                update,
+                context,
+                "👑 Панель сотрудника:" if role == SUPPORT_ROLES["agent"] else
+                "👑 Административное меню:" if role == SUPPORT_ROLES["admin"] else
+                "🏠 Главное меню:",
+                main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
+            )
         else:
             logger.warning(f"Unknown command: {query.data}")
             await send_and_remember(
                 update,
                 context,
                 "⚠️ Команда не распознана",
-                main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
+                main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type"))
             )
     except psycopg2.Error as e:
         logger.error(f"Database error in button_handler for user {user_id}: {e}", exc_info=True)
@@ -1856,7 +1890,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             f"❌ Ошибка базы данных: {e}",
-            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
+            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type"))
         )
     except Exception as e:
         logger.error(f"Unexpected error in button_handler for user {user_id}: {e}", exc_info=True)
@@ -1864,7 +1898,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             f"❌ Ошибка: {e}",
-            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type")),
+            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type"))
         )
         
 async def show_agent_info(
