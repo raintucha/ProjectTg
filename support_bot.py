@@ -368,7 +368,8 @@ async def process_report_period(
     await generate_and_send_report(update, context, start_date, end_date)
 
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("registration_flow"):
+    """Process user phone number."""
+    if not context.user_data.get("registration_flow") or "awaiting_phone" not in context.user_data:
         logger.warning(f"User {update.effective_user.id} sent phone number outside registration flow")
         await send_and_remember(
             update,
@@ -377,137 +378,30 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         return
-    # ... (rest of the function remains unchanged)
-    phone = re.sub(r"[^\d+]", "", phone)
     
-    conn = None
-    try:
-        required_fields = {
-            'user_name': str,
-            'user_address': str,
-            'problem_text': str,
-            'is_urgent': bool
-        }
-        
-        missing_fields = [field for field in required_fields if field not in context.user_data]
-        if missing_fields:
-            logger.error(f"Missing required fields for user {update.effective_user.id}: {missing_fields}")
-            await send_and_remember(
-                update,
-                context,
-                f"❌ Ошибка: отсутствуют данные ({', '.join(missing_fields)}). Начните заново.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-            )
-            return
-
-        type_errors = []
-        for field, field_type in required_fields.items():
-            if not isinstance(context.user_data[field], field_type):
-                type_errors.append(f"{field} должен быть {field_type.__name__}")
-        
-        if type_errors:
-            logger.error(f"Type errors for user {update.effective_user.id}: {type_errors}")
-            await send_and_remember(
-                update,
-                context,
-                "❌ Ошибка в формате данных. Пожалуйста, начните процесс заново.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-            )
-            return
-
-        conn = get_db_connection()
-        logger.info(f"Connected to database for user {update.effective_user.id}")
-        with conn.cursor() as cur:
-            logger.info(f"Checking if resident exists for chat_id {update.effective_user.id}")
-            cur.execute(
-                "SELECT resident_id FROM residents WHERE chat_id = %s",
-                (update.effective_user.id,)
-            )
-            if cur.fetchone():
-                logger.info(f"Resident already exists for chat_id {update.effective_user.id}")
-                await send_and_remember(
-                    update,
-                    context,
-                    "ℹ️ Вы уже зарегистрированы. Создаем новую заявку.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-                )
-
-            cur.execute(
-                """INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
-                VALUES (%s, %s, %s, %s, %s) RETURNING resident_id""",
-                (
-                    update.effective_user.id,
-                    context.user_data["user_name"],
-                    context.user_data["user_address"],
-                    phone,
-                    datetime.now(),
-                ),
-            )
-            resident_id = cur.fetchone()[0]
-            logger.info(f"Inserted resident ID {resident_id}")
-
-            cur.execute(
-                """INSERT INTO issues (resident_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, %s, %s) RETURNING issue_id""",
-                (
-                    resident_id,
-                    context.user_data["problem_text"],
-                    "urgent" if context.user_data["is_urgent"] else "normal",
-                    "new",
-                    datetime.now(),
-                ),
-            )
-            issue_id = cur.fetchone()[0]
-            logger.info(f"Inserted issue ID {issue_id}")
-
-            cur.execute(
-                """INSERT INTO issue_logs (issue_id, action, user_id, action_time)
-                VALUES (%s, 'create', %s, NOW())""",
-                (issue_id, update.effective_user.id)
-            )
-            logger.info(f"Logged issue creation for issue ID {issue_id}")
-            
-            conn.commit()
-
-            if context.user_data["is_urgent"]:
-                await send_urgent_alert(update, context, issue_id)
-
-            await send_and_remember(
-                update,
-                context,
-                "✅ Регистрация и заявка приняты!\n\n"
-                f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
-                f"Номер заявки: #{issue_id}",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-            )
-            
-            context.user_data.clear()
-            logger.info(f"Cleared user_data for user {update.effective_user.id}")
-
-    except psycopg2.Error as e:
-        logger.error(f"Database error during registration for user {update.effective_user.id}: {e}")
+    phone = update.message.text.strip()
+    # Stricter phone validation
+    cleaned_phone = re.sub(r"[^\d+]", "", phone)
+    if not re.match(r"^\+?\d{10,15}$", cleaned_phone):
         await send_and_remember(
             update,
             context,
-            f"❌ Ошибка базы данных: {e}",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            "❌ Неверный формат телефона. Введите номер в формате +1234567890:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
         )
-        if conn:
-            conn.rollback()
-    except Exception as e:
-        logger.error(f"Unexpected error during registration for user {update.effective_user.id}: {e}", exc_info=True)
-        await send_and_remember(
-            update,
-            context,
-            f"❌ Непредвиденная ошибка: {e}",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            logger.info("Closing database connection")
-            conn.close()
+        return
+    
+    context.user_data["user_phone"] = cleaned_phone
+    context.user_data["registration_flow"] = True
+    context.user_data.pop("awaiting_phone", None)
+    context.user_data["awaiting_problem"] = True
+    logger.info(f"Stored user_phone: {cleaned_phone} for chat_id: {update.effective_user.id}")
+    await send_and_remember(
+        update,
+        context,
+        "✍️ Опишите вашу проблему:",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+    )
             
 async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save new agent to database."""
@@ -933,206 +827,224 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process problem description."""
-    problem_text = update.message.text
-    logger.info(f"User {update.effective_user.id} entered problem: {problem_text}")
-    
-    # Сохраняем проблему и срочность
-    context.user_data["problem_text"] = problem_text
-    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
-    context.user_data["is_urgent"] = any(keyword in problem_text.lower() for keyword in urgent_keywords)
-    
-    # Проверяем, есть ли все необходимые данные
-    required_fields = ['user_name', 'user_address', 'problem_text', 'is_urgent']
-    if not all(field in context.user_data for field in required_fields):
-        missing = [field for field in required_fields if field not in context.user_data]
-        logger.error(f"Missing fields: {missing}")
+    if not context.user_data.get("awaiting_problem"):
+        logger.warning(f"User {update.effective_user.id} sent problem description outside expected flow")
         await send_and_remember(
             update,
             context,
-            "❌ Не все данные заполнены. Пожалуйста, начните процесс заново.",
+            "❌ Ошибка: не ожидается ввод проблемы.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         return
     
-    # Продолжаем обработку...
+    problem_text = update.message.text.strip()
+    if not problem_text:
+        logger.warning(f"User {update.effective_user.id} sent empty problem description")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Описание проблемы не может быть пустым. Пожалуйста, опишите проблему:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        return
     
-    # Check and register user in users table if missing
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (update.effective_user.id,))
-            if not cur.fetchone():
-                username = update.effective_user.username
-                full_name = update.effective_user.full_name or "Unknown"
-                cur.execute(
-                    """
-                    INSERT INTO users (user_id, username, full_name, role, registration_date)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
-                    """,
-                    (update.effective_user.id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
-                )
-                conn.commit()
-                logger.info(f"Auto-registered user {update.effective_user.id} in users table")
-    except psycopg2.Error as e:
-        logger.error(f"Database error in process_problem_report: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+    # Store problem and determine urgency
+    context.user_data["problem_text"] = problem_text
+    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
+    context.user_data["is_urgent"] = any(keyword in problem_text.lower() for keyword in urgent_keywords)
+    context.user_data.pop("awaiting_problem", None)
+    logger.info(f"Received problem: {problem_text} for chat_id: {update.effective_user.id}, is_urgent: {context.user_data['is_urgent']}")
+    logger.info(f"context.user_data before save_request_to_db: {context.user_data}")
 
-    role = await get_user_role(update.effective_user.id)
-    if role == SUPPORT_ROLES["admin"]:
-        # For admins, bypass resident check and save request directly
-        issue_id = await save_request_to_db(update, context, None)  # Use None or a default resident_id if needed
+    # Validate required fields
+    required_fields = ["user_name", "user_address", "user_phone", "problem_text", "is_urgent"]
+    missing_fields = [field for field in required_fields if field not in context.user_data or not context.user_data[field]]
+    if missing_fields:
+        logger.error(f"Missing fields in process_problem_report for user {update.effective_user.id}: {missing_fields}, user_data: {context.user_data}")
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Ошибка: отсутствуют данные ({', '.join(missing_fields)}). Пожалуйста, начните процесс заново.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        return
+
+    try:
+        issue_id = await save_request_to_db(update, context, problem_text)
         if context.user_data["is_urgent"]:
             await send_urgent_alert(update, context, issue_id)
         await send_and_remember(
             update,
             context,
-            "✅ Заявка принята!\n\n"
+            f"✅ Заявка принята!\n\n"
             f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
             f"Номер заявки: #{issue_id}",
-            main_menu_keyboard(update.effective_user.id, role),
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         context.user_data.clear()
-    else:
-        # Proceed with resident check for non-admins
-        conn = None
-        try:
-            conn = get_db_connection()
-            logger.info(f"Connected to database for user {update.effective_user.id}")
-            with conn.cursor() as cur:
-                logger.info(f"Checking resident for chat_id {update.effective_user.id}")
-                cur.execute(
-                    "SELECT resident_id FROM residents WHERE chat_id = %s",
-                    (update.effective_user.id,)
-                )
-                resident = cur.fetchone()
-                if resident:
-                    resident_id = resident[0]
-                    issue_id = await save_request_to_db(update, context, resident_id)
-                    if context.user_data["is_urgent"]:
-                        await send_urgent_alert(update, context, issue_id)
-                    await send_and_remember(
-                        update,
-                        context,
-                        "✅ Заявка принята!\n\n"
-                        f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
-                        f"Номер заявки: #{issue_id}",
-                        main_menu_keyboard(update.effective_user.id, role),
-                    )
-                    context.user_data.clear()
-                else:
-                    context.user_data["awaiting_name"] = True
-                    await send_and_remember(
-                        update,
-                        context,
-                        "👤 Введите ваше ФИО:",
-                        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-                    )
-        except psycopg2.Error as e:
-            logger.error(f"Database error in resident check: {e}")
-            await send_and_remember(
-                update,
-                context,
-                "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
-                main_menu_keyboard(update.effective_user.id, role)
-            )
-            if conn:
-                conn.rollback()
-        finally:
-            if conn:
-                logger.info("Closing database connection")
-                conn.close()
+        logger.info(f"Cleared user_data for user {update.effective_user.id}")
+    except ValueError as e:
+        logger.error(f"Validation error in process_problem_report for user {update.effective_user.id}: {e}, user_data: {context.user_data}")
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Ошибка: {e}. Пожалуйста, начните процесс заново.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in process_problem_report for user {update.effective_user.id}: {e}", exc_info=True)
+        await send_and_remember(
+            update,
+            context,
+            "❌ Произошла ошибка при сохранении заявки. Попробуйте позже.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
 
-async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, resident_id: int):
-    logger.info(f"Attempting to save request. Resident ID: {resident_id}")
-    logger.info(f"Context data: {context.user_data}")
-    user_id = update.effective_user.id
-    conn = None
+async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, problem_text: str):
+    """Save the issue to the database and notify relevant parties."""
+    chat_id = update.effective_user.id
+    role = await get_user_role(chat_id)
+    full_name = context.user_data.get("user_name", update.effective_user.full_name or "Unknown")
+    address = context.user_data.get("user_address", "Админ" if role == SUPPORT_ROLES["admin"] else None)
+    phone = context.user_data.get("user_phone", None)
+    problem_text = context.user_data.get("problem_text", problem_text)
+    is_urgent = context.user_data.get("is_urgent", False)
+
+    # Validate required fields for non-admins
+    if role != SUPPORT_ROLES["admin"]:
+        required_fields = {
+            "user_name": full_name,
+            "user_address": address,
+            "user_phone": phone,
+            "problem_text": problem_text,
+            "is_urgent": is_urgent
+        }
+        missing_fields = [field for field, value in required_fields.items() if not value]
+        if missing_fields:
+            logger.error(f"Missing fields in save_request_to_db for user {chat_id}: {missing_fields}, user_data: {context.user_data}")
+            raise ValueError(f"Отсутствуют данные: {', '.join(missing_fields)}")
+        
+        # Validate field types
+        type_errors = []
+        if not isinstance(full_name, str):
+            type_errors.append("user_name должен быть строкой")
+        if not isinstance(address, str):
+            type_errors.append("user_address должен быть строкой")
+        if not isinstance(phone, str):
+            type_errors.append("user_phone должен быть строкой")
+        if not isinstance(problem_text, str):
+            type_errors.append("problem_text должен быть строкой")
+        if not isinstance(is_urgent, bool):
+            type_errors.append("is_urgent должен быть булевым")
+        if type_errors:
+            logger.error(f"Type errors in save_request_to_db for user {chat_id}: {type_errors}")
+            raise ValueError("Ошибка в формате данных")
+
+    resident_id = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         with conn.cursor() as cur:
-            # Ensure user exists in users table
-            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+            # Register user in users table if missing
+            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (chat_id,))
             if not cur.fetchone():
                 username = update.effective_user.username
-                full_name = update.effective_user.full_name or "Unknown"
                 cur.execute(
                     """
                     INSERT INTO users (user_id, username, full_name, role, registration_date)
                     VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
                     """,
-                    (user_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
+                    (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
                 )
                 conn.commit()
-                logger.info(f"Auto-registered user {user_id} in users table")
+                logger.info(f"Auto-registered user {chat_id} in users table")
 
-            # If resident_id is None (admin case), create a temporary resident
-            if resident_id is None:
-                full_name = update.effective_user.full_name or "Admin User"
-                address = "Admin Address"
-                phone = "N/A"
+            if role != SUPPORT_ROLES["admin"]:
+                # Check if resident exists
                 cur.execute(
-                    """
-                    INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
-                    VALUES (%s, %s, %s, %s, %s) RETURNING resident_id
-                    """,
-                    (user_id, full_name, address, phone, datetime.now()),
+                    "SELECT resident_id FROM residents WHERE chat_id = %s",
+                    (chat_id,),
                 )
-                resident_id = cur.fetchone()[0]
-                logger.info(f"Created temporary resident ID {resident_id} for admin {user_id}")
+                resident = cur.fetchone()
+                if resident:
+                    resident_id = resident[0]
+                    logger.info(f"Found existing resident_id: {resident_id} for chat_id: {chat_id}")
+                else:
+                    # Create new resident
+                    cur.execute(
+                        """
+                        INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
+                        VALUES (%s, %s, %s, %s, %s)
+                        RETURNING resident_id
+                        """,
+                        (chat_id, full_name, address, phone, datetime.now()),
+                    )
+                    resident_id = cur.fetchone()[0]
+                    conn.commit()
+                    logger.info(f"Created new resident_id: {resident_id} for chat_id: {chat_id}")
 
-            # Validate resident_id
-            cur.execute("SELECT 1 FROM residents WHERE resident_id = %s", (resident_id,))
-            if not cur.fetchone():
-                logger.error(f"Resident {resident_id} not found in database")
-                raise ValueError(f"Resident {resident_id} not found")
-
-            # Validate required fields
-            required_fields = ['problem_text', 'is_urgent']
-            for field in required_fields:
-                if field not in context.user_data:
-                    logger.error(f"Missing required field: {field}")
-                    raise ValueError(f"Missing {field}")
-
-            # Insert issue
+            # Save the issue
             cur.execute(
                 """
-                INSERT INTO issues (resident_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, %s, %s) RETURNING issue_id
+                INSERT INTO issues (resident_id, chat_id, description, category, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING issue_id
                 """,
                 (
                     resident_id,
-                    context.user_data["problem_text"],
-                    "urgent" if context.user_data["is_urgent"] else "normal",
+                    chat_id,
+                    problem_text,
+                    "urgent" if is_urgent else "normal",
                     "new",
-                    datetime.now()
-                )
+                    datetime.now(),
+                ),
             )
             issue_id = cur.fetchone()[0]
+            conn.commit()
+            logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
 
-            # Log issue creation
+            # Log the issue creation
             cur.execute(
                 """
-                INSERT INTO issue_logs (issue_id, action, user_id, action_time)
-                VALUES (%s, 'create', %s, NOW())
+                INSERT INTO issue_logs (issue_id, user_id, action, details, log_time)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (issue_id, user_id)
+                (
+                    issue_id,
+                    chat_id,
+                    "created",
+                    f"Новая заявка от {full_name}: {problem_text}",
+                    datetime.now(),
+                ),
             )
             conn.commit()
-            logger.info(f"Successfully saved issue #{issue_id} with log")
-            return issue_id
+            logger.info(f"Logged issue creation for issue ID {issue_id}")
 
-    except psycopg2.IntegrityError as e:
-        logger.error(f"Integrity error: {e}")
-        raise ValueError("Database integrity error") from e
-    except Exception as e:
-        logger.error(f"Error saving request: {e}")
+        return issue_id
+
+    except psycopg2.Error as e:
+        logger.error(f"Database error in save_request_to_db for user {chat_id}: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка базы данных при сохранении заявки. Попробуйте позже.",
+            main_menu_keyboard(chat_id, role),
+        )
+        conn.rollback()
+        raise
+    except ValueError as e:
+        logger.error(f"Validation error in save_request_to_db for user {chat_id}: {e}")
+        await send_and_remember(
+            update,
+            context,
+            f"❌ Ошибка: {e}. Пожалуйста, начните процесс заново.",
+            main_menu_keyboard(chat_id, role),
+        )
+        conn.rollback()
         raise
     finally:
         if conn:
+            logger.info("Closing database connection")
             conn.close()
 
 async def send_urgent_alert(
@@ -1164,10 +1076,20 @@ async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         return
-    context.user_data["user_name"] = update.message.text
+    user_name = update.message.text.strip()
+    if not user_name:
+        await send_and_remember(
+            update,
+            context,
+            "❌ ФИО не может быть пустым. Пожалуйста, введите ваше ФИО:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        return
+    context.user_data["user_name"] = user_name
+    context.user_data["registration_flow"] = True
     context.user_data.pop("awaiting_name", None)
     context.user_data["awaiting_address"] = True
-    context.user_data["registration_flow"] = True  # Ensure registration flow is set
+    logger.info(f"Stored user_name: {user_name} for chat_id: {update.effective_user.id}")
     await send_and_remember(
         update,
         context,
@@ -1185,17 +1107,27 @@ async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYP
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         return
-    context.user_data["user_address"] = update.message.text
+    user_address = update.message.text.strip()
+    if not user_address:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Адрес не может быть пустым. Пожалуйста, введите ваш адрес:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        return
+    context.user_data["user_address"] = user_address
+    context.user_data["registration_flow"] = True
     context.user_data.pop("awaiting_address", None)
     context.user_data["awaiting_phone"] = True
-    context.user_data["registration_flow"] = True  # Ensure registration flow is set
+    logger.info(f"Stored user_address: {user_address} for chat_id: {update.effective_user.id}")
     await send_and_remember(
         update,
         context,
-        "📱 Введите ваш контактный телефон:",
+        "📱 Введите ваш контактный телефон (например: +1234567890):",
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
     )
-    
+
 async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active requests for agents."""
     if not await is_agent(update.effective_user.id):
