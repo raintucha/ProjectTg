@@ -865,6 +865,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     # Store problem and determine urgency
     context.user_data["problem_text"] = problem_text
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
+    # После определения срочности заявки
     context.user_data["is_urgent"] = any(keyword in problem_text.lower() for keyword in urgent_keywords)
     context.user_data.pop("awaiting_problem", None)
     logger.info(f"Received problem: {problem_text} for chat_id: {update.effective_user.id}, is_urgent: {context.user_data['is_urgent']}")
@@ -933,8 +934,8 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     address = context.user_data.get("user_address", "Админ" if role == SUPPORT_ROLES["admin"] else None)
     phone = context.user_data.get("user_phone", None)
     problem_text = context.user_data.get("problem_text", problem_text)
-    is_urgent = context.user_data.get("is_urgent", False)
-
+    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
+    is_urgent = any(keyword in problem_text.lower() for keyword in urgent_keywords)
     logger.info(f"Saving request for user {chat_id}: full_name={full_name}, address={address}, phone={phone}, problem_text={problem_text}, is_urgent={is_urgent}")
 
     # Validate required fields for non-admins
