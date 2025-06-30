@@ -369,7 +369,7 @@ async def process_report_period(
 
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user phone number."""
-    if not context.user_data.get("registration_flow") or "awaiting_phone" not in context.user_data:
+    if not context.user_data.get("registration_flow") or not context.user_data.get("awaiting_phone"):
         logger.warning(f"User {update.effective_user.id} sent phone number outside registration flow")
         await send_and_remember(
             update,
@@ -630,16 +630,11 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     username = update.effective_user.username
     logger.info(f"User {chat_id} started new request process")
 
-    # Check if we're in registration flow
-    if context.user_data.get("registration_flow"):
-        await send_and_remember(
-            update,
-            context,
-            "✍️ Опишите вашу проблему:",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-        )
-        context.user_data["awaiting_problem"] = True
-        return
+    # Clear stale user_data except user_type to prevent conflicts
+    user_type = context.user_data.get("user_type")
+    context.user_data.clear()
+    if user_type:
+        context.user_data["user_type"] = user_type
 
     # Check and register user in users table if missing
     conn = get_db_connection()
@@ -651,7 +646,7 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                     """
                     INSERT INTO users (user_id, username, full_name, role, registration_date)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name, role = EXCLUDED.role, registration_date = EXCLUDED.registration_date
+                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
                     """,
                     (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
                 )
@@ -660,19 +655,26 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     except psycopg2.Error as e:
         logger.error(f"Database error in process_new_request: {e}")
         conn.rollback()
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка базы данных. Попробуйте позже.",
+            main_menu_keyboard(chat_id, await get_user_role(chat_id)),
+        )
+        return
     finally:
         conn.close()
 
     role = await get_user_role(chat_id)
     if role == SUPPORT_ROLES["admin"]:
         # For admins, skip resident check and prompt directly for problem description
+        context.user_data["awaiting_problem"] = True
         await send_and_remember(
             update,
             context,
             "✍️ Опишите вашу проблему (для админа):",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
         )
-        context.user_data["awaiting_problem"] = True
     else:
         # For non-admins, proceed with resident check flow
         conn = get_db_connection()
@@ -681,16 +683,29 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
                 resident = cur.fetchone()
                 if resident:
+                    # For registered residents, fetch details and prompt for problem
+                    cur.execute(
+                        "SELECT full_name, address, phone FROM residents WHERE chat_id = %s",
+                        (chat_id,)
+                    )
+                    resident_data = cur.fetchone()
+                    context.user_data["resident_id"] = resident[0]
+                    context.user_data["user_name"] = resident_data[0]
+                    context.user_data["user_address"] = resident_data[1]
+                    context.user_data["user_phone"] = resident_data[2]
+                    context.user_data["awaiting_problem"] = True
+                    logger.info(f"Loaded resident data for chat_id {chat_id}: {context.user_data}")
                     await send_and_remember(
                         update,
                         context,
                         "✍️ Опишите вашу проблему:",
                         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
                     )
-                    context.user_data["awaiting_problem"] = True
                 else:
+                    # For non-registered residents, start registration flow
+                    context.user_data["registration_flow"] = True
                     context.user_data["awaiting_name"] = True
-                    context.user_data["registration_flow"] = True  # Set registration flow
+                    logger.info(f"Starting registration flow for chat_id {chat_id}")
                     await send_and_remember(
                         update,
                         context,
@@ -703,13 +718,11 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 update,
                 context,
                 "❌ Ошибка базы данных при проверке резидента. Попробуйте позже.",
-                main_menu_keyboard(chat_id, role)
+                main_menu_keyboard(chat_id, role),
             )
-            if conn:
-                conn.rollback()
+            conn.rollback()
         finally:
-            if conn:
-                conn.close()
+            conn.close()
                 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
@@ -1068,7 +1081,8 @@ async def send_urgent_alert(
 
 async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user full name."""
-    if "awaiting_name" not in context.user_data:
+    if not context.user_data.get("awaiting_name") or not context.user_data.get("registration_flow"):
+        logger.warning(f"User {update.effective_user.id} sent name outside registration flow")
         await send_and_remember(
             update,
             context,
@@ -1078,6 +1092,7 @@ async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_name = update.message.text.strip()
     if not user_name:
+        logger.warning(f"User {update.effective_user.id} sent empty name")
         await send_and_remember(
             update,
             context,
@@ -1099,7 +1114,8 @@ async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user address."""
-    if "awaiting_address" not in context.user_data:
+    if not context.user_data.get("awaiting_address") or not context.user_data.get("registration_flow"):
+        logger.warning(f"User {update.effective_user.id} sent address outside registration flow")
         await send_and_remember(
             update,
             context,
@@ -1109,6 +1125,7 @@ async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     user_address = update.message.text.strip()
     if not user_address:
+        logger.warning(f"User {update.effective_user.id} sent empty address")
         await send_and_remember(
             update,
             context,
