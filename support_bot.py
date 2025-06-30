@@ -273,7 +273,7 @@ async def safe_send_message(update, context, text, keyboard=None):
         logger.error(f"Failed to send message: {e}")
 
 async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /clear command to fully reset chat history as fast as possible."""
+    """Handle /clear command to fully reset chat history."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
@@ -281,27 +281,44 @@ async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.chat_data.clear()
         
+        # Get the current message ID
         current_message_id = update.message.message_id
-        message_ids = list(range(max(1, current_message_id - 1000), current_message_id + 1))
+        
+        # Attempt to delete recent messages (up to 1000 messages back)
+        message_ids = []
+        for i in range(max(1, current_message_id - 1000), current_message_id + 1):
+            message_ids.append(i)
         
         async def delete_single_message(msg_id):
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            except Exception:
-                pass
+                logger.info(f"Deleted message ID {msg_id} for user {user_id}")
+            except telegram.error.BadRequest as e:
+                if "message to delete not found" not in str(e).lower():
+                    logger.warning(f"Failed to delete message ID {msg_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Error deleting message ID {msg_id}: {e}")
         
+        # Delete messages in batches
         batch_size = 50
         for i in range(0, len(message_ids), batch_size):
             batch = message_ids[i:i + batch_size]
             await asyncio.gather(*[delete_single_message(msg_id) for msg_id in batch])
         
-        await update.message.reply_text(
-            "🧹 Чат полностью очищен! Нажмите /start, чтобы начать заново."
+        # Send confirmation message
+        await send_and_remember(
+            update,
+            context,
+            "🧹 Чат полностью очищен! Нажмите /start, чтобы начать заново.",
+            main_menu_keyboard(user_id, await get_user_role(user_id), user_type=context.user_data.get("user_type"))
         )
     except Exception as e:
-        logger.error(f"Error clearing chat: {e}")
-        await update.message.reply_text(
-            "❌ Не удалось полностью очистить чат. Попробуйте снова или используйте /start."
+        logger.error(f"Error clearing chat for user {user_id}: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Не удалось полностью очистить чат. Попробуйте снова или используйте /start.",
+            main_menu_keyboard(user_id, await get_user_role(user_id), user_type=context.user_data.get("user_type"))
         )
 
 async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -614,14 +631,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     role = await get_user_role(chat_id)
     
-    # Clear any existing user data
-    context.user_data.clear()
+    # Preserve user_type if it exists
+    user_type = context.user_data.get("user_type")
+    
+    # Clear any existing user data except user_type
+    for key in list(context.user_data.keys()):
+        if key != "user_type":
+            del context.user_data[key]
     
     if role == SUPPORT_ROLES["admin"]:
-        await update.message.reply_text(
-            "👑 Добро пожаловать, администратор!",
-            reply_markup=main_menu_keyboard(chat_id, role, is_in_main_menu=True)
-        )
+        text = "👑 Добро пожаловать, администратор!"
+        reply_markup = main_menu_keyboard(chat_id, role, is_in_main_menu=True)
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup)
+        elif update.callback_query:
+            await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
         return
 
     conn = get_db_connection()
@@ -643,25 +667,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
                 )
                 conn.commit()
-                await update.message.reply_text(
-                    "🏠 Добро пожаловать обратно!",
-                    reply_markup=main_menu_keyboard(chat_id, role, is_in_main_menu=True)
-                )
+                text = "🏠 Добро пожаловать обратно!"
+                reply_markup = main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+                if update.message:
+                    await update.message.reply_text(text, reply_markup=reply_markup)
+                elif update.callback_query:
+                    await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
             else:
-                # Если резидент не найден, предлагаем зарегистрироваться
-                keyboard = [
-                    [InlineKeyboardButton("📝 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-                    [InlineKeyboardButton("ℹ️ Я потенциальный покупатель", callback_data="select_potential_buyer")]
-                ]
-                await update.message.reply_text(
-                    "👋 Добро пожаловать! Выберите ваш статус:",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                # If user_type is already set (e.g., potential_buyer), show appropriate menu
+                if user_type == USER_TYPES["potential_buyer"]:
+                    text = "🏠 Вы вошли как потенциальный покупатель.\n\nВыберите действие:"
+                    reply_markup = main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+                    if update.message:
+                        await update.message.reply_text(text, reply_markup=reply_markup)
+                    elif update.callback_query:
+                        await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
+                else:
+                    # Offer registration options
+                    keyboard = [
+                        [InlineKeyboardButton("📝 Зарегистрироваться как резидент", callback_data="register_as_resident")],
+                        [InlineKeyboardButton("ℹ️ Я потенциальный покупатель", callback_data="select_potential_buyer")]
+                    ]
+                    text = "👋 Добро пожаловать! Выберите ваш статус:"
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    if update.message:
+                        await update.message.reply_text(text, reply_markup=reply_markup)
+                    elif update.callback_query:
+                        await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
     except psycopg2.Error as e:
         logger.error(f"Database error in /start: {e}")
-        await update.message.reply_text(
-            "❌ Ошибка базы данных. Попробуйте позже.",
-            reply_markup=main_menu_keyboard(chat_id, role))
+        text = "❌ Ошибка базы данных. Попробуйте позже."
+        reply_markup = main_menu_keyboard(chat_id, role, user_type=user_type)
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup)
+        elif update.callback_query:
+            await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
         conn.rollback()
     finally:
         conn.close()
@@ -706,8 +746,6 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         context.user_data["awaiting_problem"] = True
         return
-
-    # Rest of your existing code...
 
     # Check and register user in users table if missing
     conn = get_db_connection()
@@ -758,6 +796,7 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                     context.user_data["awaiting_problem"] = True
                 else:
                     context.user_data["awaiting_name"] = True
+                    context.user_data["registration_flow"] = True  # Set registration flow
                     await send_and_remember(
                         update,
                         context,
@@ -1117,9 +1156,18 @@ async def send_urgent_alert(
 
 async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user full name."""
+    if "awaiting_name" not in context.user_data:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается ввод ФИО.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        return
     context.user_data["user_name"] = update.message.text
     context.user_data.pop("awaiting_name", None)
     context.user_data["awaiting_address"] = True
+    context.user_data["registration_flow"] = True  # Ensure registration flow is set
     await send_and_remember(
         update,
         context,
@@ -1129,16 +1177,25 @@ async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process user address."""
+    if "awaiting_address" not in context.user_data:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается ввод адреса.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        return
     context.user_data["user_address"] = update.message.text
     context.user_data.pop("awaiting_address", None)
     context.user_data["awaiting_phone"] = True
+    context.user_data["registration_flow"] = True  # Ensure registration flow is set
     await send_and_remember(
         update,
         context,
         "📱 Введите ваш контактный телефон:",
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
     )
-
+    
 async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active requests for agents."""
     if not await is_agent(update.effective_user.id):
@@ -1801,12 +1858,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await start(update, context)
         elif query.data == "back_to_main":
             # Для админа возвращаем в админское меню с особым сообщением
+            user_type = context.user_data.get("user_type")  
             if role == SUPPORT_ROLES["admin"]:
                 await send_and_remember(
                     update,
                     context,
                     "👑 Административное меню:",
-                    main_menu_keyboard(user_id, role, is_in_main_menu=True)
+                    main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
                 )
             else:
                 await start(update, context)
