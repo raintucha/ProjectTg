@@ -927,7 +927,6 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, problem_text: str):
-    """Save the issue to the database and notify relevant parties."""
     chat_id = update.effective_user.id
     role = await get_user_role(chat_id)
     full_name = context.user_data.get("user_name", update.effective_user.full_name or "Unknown")
@@ -935,8 +934,8 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     phone = context.user_data.get("user_phone", None)
     problem_text = context.user_data.get("problem_text", problem_text)
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
-    is_urgent = any(keyword in problem_text.lower() for keyword in urgent_keywords)
-    logger.info(f"Saving request for user {chat_id}: full_name={full_name}, address={address}, phone={phone}, problem_text={problem_text}, is_urgent={is_urgent}")
+    is_urgent = context.user_data.get("is_urgent", any(keyword in problem_text.lower() for keyword in urgent_keywords))
+    logger.info(f"Saving request for user {chat_id}: user_data={context.user_data}, is_urgent={is_urgent}")
 
     # Validate required fields for non-admins
     if role != SUPPORT_ROLES["admin"]:
@@ -944,8 +943,7 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "user_name": full_name,
             "user_address": address,
             "user_phone": phone,
-            "problem_text": problem_text,
-            "is_urgent": is_urgent
+            "problem_text": problem_text
         }
         missing_fields = [field for field, value in required_fields.items() if not value]
         if missing_fields:
@@ -962,8 +960,6 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             type_errors.append("user_phone должен быть строкой")
         if not isinstance(problem_text, str):
             type_errors.append("problem_text должен быть строкой")
-        if not isinstance(is_urgent, bool):
-            type_errors.append("is_urgent должен быть булевым")
         if type_errors:
             logger.error(f"Type errors in save_request_to_db for user {chat_id}: {type_errors}")
             raise ValueError(f"Ошибка в формате данных: {', '.join(type_errors)}")
@@ -1011,49 +1007,41 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     conn.commit()
                     logger.info(f"Created new resident_id: {resident_id} for chat_id: {chat_id}")
 
-            # Save the issue (removed chat_id)
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO issues (resident_id, description, category, status, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    RETURNING issue_id
-                    """,
-                    (
-                        resident_id,
-                        problem_text,
-                        "urgent" if is_urgent else "normal",
-                        "new",
-                        datetime.now(),
-                    ),
-                )
-                issue_id = cur.fetchone()[0]
-                conn.commit()
-                logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
-            except psycopg2.Error as e:
-                logger.error(f"Failed to insert issue for user {chat_id}: {e}", exc_info=True)
-                raise psycopg2.Error(f"Ошибка при сохранении заявки: {e}")
+            # Save the issue
+            cur.execute(
+                """
+                INSERT INTO issues (resident_id, description, category, status, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING issue_id
+                """,
+                (
+                    resident_id,
+                    problem_text,
+                    "urgent" if is_urgent else "normal",
+                    "new",
+                    datetime.now(),
+                ),
+            )
+            issue_id = cur.fetchone()[0]
+            conn.commit()
+            logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
 
             # Log the issue creation
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO issue_logs (issue_id, user_id, action, details, log_time)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (
-                        issue_id,
-                        chat_id,
-                        "created",
-                        f"Новая заявка от {full_name}: {problem_text}",
-                        datetime.now(),
-                    ),
-                )
-                conn.commit()
-                logger.info(f"Logged issue creation for issue ID {issue_id}")
-            except psycopg2.Error as e:
-                logger.error(f"Failed to insert issue log for issue {issue_id}: {e}", exc_info=True)
-                raise psycopg2.Error(f"Ошибка при записи лога заявки: {e}")
+            cur.execute(
+                """
+                INSERT INTO issue_logs (issue_id, user_id, action, details, action_time)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    issue_id,
+                    chat_id,
+                    "created",
+                    f"Новая заявка от {full_name}: {problem_text}",
+                    datetime.now(),
+                ),
+            )
+            conn.commit()
+            logger.info(f"Logged issue creation for issue ID {issue_id}")
 
         return issue_id
 
