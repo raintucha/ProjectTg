@@ -102,6 +102,7 @@ def init_db():
                     issue_id INTEGER NOT NULL REFERENCES issues(issue_id),
                     action TEXT NOT NULL,
                     user_id BIGINT NOT NULL REFERENCES users(user_id),
+                    details TEXT,  -- Добавляем столбец details
                     action_time TIMESTAMP NOT NULL
                 )
             """)
@@ -870,7 +871,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
     logger.info(f"context.user_data before save_request_to_db: {context.user_data}")
 
     # Validate required fields
-    required_fields = ["user_name", "user_address", "user_phone", "problem_text", "is_urgent"]
+    required_fields = ["user_name", "user_address", "user_phone", "problem_text"]  # Removed is_urgent
     missing_fields = [field for field in required_fields if field not in context.user_data or not context.user_data[field]]
     if missing_fields:
         logger.error(f"Missing fields in process_problem_report for user {update.effective_user.id}: {missing_fields}, user_data: {context.user_data}")
