@@ -129,7 +129,7 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         raise
 
-async def get_user_role(user_id: int) -> int:  # Changed return type to int
+async def get_user_role(user_id: int) -> int:
     """Retrieve user role from database."""
     if str(user_id) == DIRECTOR_CHAT_ID:
         conn = None
@@ -140,16 +140,16 @@ async def get_user_role(user_id: int) -> int:  # Changed return type to int
                     """
                     INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO NOTHING
+                    ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, user_type = EXCLUDED.user_type
                     """,
-                    (user_id, None, "Director", SUPPORT_ROLES["admin"], "resident", datetime.now())
+                    (user_id, None, "Director", SUPPORT_ROLES["admin"], None, datetime.now(timezone.utc))
                 )
                 conn.commit()
                 logger.info(f"Auto-registered director {user_id} as admin")
                 return SUPPORT_ROLES["admin"]
         except psycopg2.Error as e:
             logger.error(f"Database error auto-registering director {user_id}: {e}", exc_info=True)
-            return SUPPORT_ROLES["admin"]
+            return SUPPORT_ROLES["admin"]  # Return admin role even on error for director
         finally:
             if conn:
                 conn.close()
@@ -162,6 +162,16 @@ async def get_user_role(user_id: int) -> int:  # Changed return type to int
             result = cur.fetchone()
             if result:
                 return result[0]  # Return role as integer
+            # Insert new user with default role if not found
+            cur.execute(
+                """
+                INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO NOTHING
+                """,
+                (user_id, None, "Unknown", SUPPORT_ROLES["user"], None, datetime.now(timezone.utc))
+            )
+            conn.commit()
             return SUPPORT_ROLES["user"]  # Default to user role (1)
     except psycopg2.Error as e:
         logger.error(f"Database error getting role for user_id {user_id}: {e}", exc_info=True)
@@ -483,13 +493,20 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             with conn.cursor() as cur:
                 cur.execute("SELECT user_type FROM users WHERE user_id = %s", (user_id,))
                 result = cur.fetchone()
-                user_type = result[0] if result else "unknown"
+                user_type = result[0] if result else None  # Set to None for new users instead of "unknown"
         except psycopg2.Error as e:
             logger.error(f"Database error fetching user_type for {user_id}: {e}", exc_info=True)
-            user_type = "unknown"
+            user_type = None
         finally:
             if conn:
                 conn.close()
+
+    # New users (no role or user_type) get only registration options
+    if role is None or user_type is None:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
+            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")]
+        ])
 
     # Admin menu
     if role == SUPPORT_ROLES["admin"]:
@@ -511,18 +528,16 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
             [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
         ]
-    # Resident menu (based on role or user_type)
-    elif role == SUPPORT_ROLES["resident"] or user_type == USER_TYPES["resident"]:
+    # Resident menu (based on user_type, since role might not be correctly set)
+    elif user_type == USER_TYPES["resident"]:
         keyboard = [
             [InlineKeyboardButton("📝 Новая заявка", callback_data="new_request")],
             [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
             [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
         ]
-    # Default menu for unregistered users or potential buyers
-    else:
+    # Potential buyer menu
+    elif user_type == USER_TYPES["potential_buyer"]:
         keyboard = [
-            [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")],
             [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
             [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
             [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
@@ -634,9 +649,9 @@ async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYP
                     user_id,
                     update.effective_user.username,
                     update.effective_user.full_name or "Unknown",
-                    SUPPORT_ROLES["resident"],
+                    SUPPORT_ROLES["user"],  # Changed from SUPPORT_ROLES["resident"] to SUPPORT_ROLES["user"]
                     USER_TYPES["resident"],
-                    datetime.now()
+                    datetime.now(timezone.utc)
                 )
             )
             conn.commit()
@@ -2733,6 +2748,66 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
         context.user_data.pop("new_resident_address", None)
         conn.close()
 
+# ... (previous code, including process_new_resident_phone)
+
+async def handle_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle full name input during resident registration."""
+    if not context.user_data.get("awaiting_name") or not context.user_data.get("registration_flow"):
+        logger.warning(f"User {update.effective_user.id} sent name outside registration flow")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается ввод ФИО.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+        )
+        return
+    
+    full_name = update.message.text.strip()
+    if not full_name:
+        logger.warning(f"User {update.effective_user.id} sent empty name")
+        await send_and_remember(
+            update,
+            context,
+            "❌ ФИО не может быть пустым. Пожалуйста, введите ваше ФИО:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        return
+    
+    user_id = update.effective_user.id
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users SET full_name = %s WHERE user_id = %s
+                """,
+                (full_name, user_id)
+            )
+            conn.commit()
+        context.user_data["user_name"] = full_name  # Store for further use in registration
+        context.user_data.pop("awaiting_name", None)
+        context.user_data["awaiting_address"] = True  # Move to next step
+        logger.info(f"Stored full_name: {full_name} for chat_id: {user_id}")
+        await send_and_remember(
+            update,
+            context,
+            "🏠 Введите ваш адрес (например: Корпус 1, кв. 25):",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
+        )
+    except psycopg2.Error as e:
+        logger.error(f"Database error updating full_name for user {user_id}: {e}", exc_info=True)
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка базы данных. Попробуйте позже.",
+            main_menu_keyboard(user_id, await get_user_role(user_id))
+        )
+    finally:
+        if conn:
+            conn.close()
+
+# Update save_user_data to route to handle_name_input
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
     logger.info(f"Current context.user_data: {context.user_data}")
@@ -2750,8 +2825,8 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_new_resident_phone(update, context)
     elif "awaiting_problem" in context.user_data:
         await process_problem_report(update, context)
-    elif "awaiting_name" in context.user_data:
-        await process_user_name(update, context)
+    elif "awaiting_name" in context.user_data:  # Route to handle_name_input
+        await handle_name_input(update, context)
     elif "awaiting_address" in context.user_data:
         await process_user_address(update, context)
     elif "awaiting_phone" in context.user_data:
