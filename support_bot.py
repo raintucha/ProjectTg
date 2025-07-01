@@ -1396,39 +1396,50 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         if conn:
             conn.close()
 
+# support_bot.py
+
 async def show_request_detail(
     update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int
 ):
-    """Show request details with completion option."""
+    """Show detailed request information including address and phone."""
     if not await is_agent(update.effective_user.id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
+    
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
+            # ИЗМЕНЕНИЕ: Добавляем r.address и r.phone в SQL-запрос
             cur.execute(
                 """
-                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.chat_id
+                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.chat_id, r.address, r.phone
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.issue_id = %s
                 """,
                 (issue_id,),
             )
-            request = cur.fetchone()
+            request_data = cur.fetchone()
 
-        if not request:
+        if not request_data:
             await update.callback_query.answer("Заявка не найдена", show_alert=True)
             return
 
+        # ИЗМЕНЕНИЕ: Распаковываем все полученные данные
+        (issue_id, full_name, description, created_at, category, resident_chat_id, address, phone) = request_data
+
+        # ИЗМЕНЕНИЕ: Формируем полный и подробный текст отчета
         text = (
-            f"🆔 Номер: #{request[0]}\n"
-            f"👤 От: {request[1]}\n"
-            f"📅 Дата: {request[3].strftime('%d.%m.%Y %H:%M')}\n"
-            f"🚨 Тип: {'Срочная' if request[4] == 'urgent' else 'Обычная'}\n"
-            f"📝 Описание: {request[2]}"
+            f"📄 **Детали заявки #{issue_id}**\n\n"
+            f"👤 **От:** {full_name}\n"
+            f"🏠 **Адрес:** {address}\n"
+            f"📞 **Телефон:** {phone}\n"
+            f"📅 **Дата:** {created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🚨 **Тип:** {'Срочная' if category == 'urgent' else 'Обычная'}\n\n"
+            f"📝 **Описание проблемы:**\n{description}"
         )
+        
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -1437,7 +1448,7 @@ async def show_request_detail(
             ],
             [
                 InlineKeyboardButton(
-                    "📨 Написать пользователю", callback_data=f"message_user_{request[5]}"
+                    "📨 Написать пользователю", callback_data=f"message_user_{resident_chat_id}"
                 )
             ],
             [InlineKeyboardButton("🔙 Назад к списку", callback_data="active_requests")],
@@ -1450,7 +1461,7 @@ async def show_request_detail(
             InlineKeyboardMarkup(keyboard),
         )
     except psycopg2.Error as e:
-        logger.error(f"Error retrieving request details: {e}")
+        logger.error(f"Error retrieving request details for issue {issue_id}: {e}")
         await send_and_remember(
             update,
             context,
