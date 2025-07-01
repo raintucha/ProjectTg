@@ -1306,64 +1306,91 @@ async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYP
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
     )
 
+# support_bot.py
+
 async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show active requests for agents with individual detail buttons."""
-    if not await is_agent(update.effective_user.id):
+    """Show active requests for agents with pagination."""
+    user_id = update.effective_user.id
+    if not await is_agent(user_id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
+
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.address, r.phone
+                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.status = 'new'
-                ORDER BY i.created_at DESC
-                LIMIT 20
+                ORDER BY i.created_at ASC
                 """
             )
-            requests = cur.fetchall()
+            all_requests = cur.fetchall()
 
-        if not requests:
+        if not all_requests:
             await send_and_remember(
                 update,
                 context,
                 "📭 Нет активных заявок.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+                main_menu_keyboard(user_id, await get_user_role(user_id))
             )
             return
 
-        for req in requests:
-            issue_id, full_name, description, created_at, category, address, phone = req
-            text = (
-                f"🆔 Номер: #{issue_id}\n"
-                f"👤 От: {full_name}\n"
-                f"🏠 Адрес: {address}\n"
-                f"📱 Телефон: {phone}\n"
-                f"📅 Дата: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
-                f"🚨 Тип: {'Срочная' if category == 'urgent' else 'Обычная'}\n"
-                f"📝 Описание: {description[:100]}{'...' if len(description) > 100 else ''}\n"
+        # --- Логика пагинации (постраничного вывода) ---
+        page = context.user_data.get("active_requests_page", 0)
+        items_per_page = 5  # 5 заявок на одной странице
+        start_index = page * items_per_page
+        end_index = start_index + items_per_page
+        
+        paginated_requests = all_requests[start_index:end_index]
+        total_pages = (len(all_requests) + items_per_page - 1) // items_per_page
+
+        if not paginated_requests:
+            await send_and_remember(update, context, "📭 Больше заявок нет.")
+            return
+
+        # --- Формирование одного сообщения со списком ---
+        text = f"🔔 Активные заявки (Страница {page + 1}/{total_pages}):\n\n"
+        keyboard = []
+        for req in paginated_requests:
+            issue_id, full_name, description, created_at, category = req
+            text += (
+                f"🆔 #{issue_id} от {created_at.strftime('%d.%m')} - {full_name}\n"
+                f"📝 {description[:40]}{'...' if len(description) > 40 else ''}\n"
+                f"{'🚨 Срочная' if category == 'urgent' else '📋 Обычная'}\n\n"
             )
-            keyboard = [
-                [InlineKeyboardButton("🔍 Подробности", callback_data=f"request_detail_{issue_id}")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-            ]
-            await send_and_remember(
-                update,
-                context,
-                text,
-                InlineKeyboardMarkup(keyboard),
-            )
+            # Добавляем кнопку для просмотра деталей этой заявки
+            keyboard.append([InlineKeyboardButton(f"🔍 Смотреть заявку #{issue_id}", callback_data=f"request_detail_{issue_id}")])
+
+        # --- Кнопки навигации ---
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data="req_prev"))
+        if end_index < len(all_requests):
+            nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data="req_next"))
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+            
+        keyboard.append([InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")])
+
+        await send_and_remember(
+            update,
+            context,
+            text,
+            InlineKeyboardMarkup(keyboard),
+        )
+
     except psycopg2.Error as e:
         logger.error(f"Error retrieving active requests: {e}")
         await send_and_remember(
             update,
             context,
             "❌ Ошибка при получении данных.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            main_menu_keyboard(user_id, await get_user_role(user_id)),
         )
     finally:
         if conn:
@@ -1884,6 +1911,8 @@ async def send_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
 
+# support_bot.py
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
     query = update.callback_query
@@ -1970,8 +1999,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "help":
             logger.info(f"User {user_id} pressed 'help' button")
             await show_help(update, context)
+        
+        # --- БЛОК ОБРАБОТКИ СПИСКА АКТИВНЫХ ЗАЯВОК И НАВИГАЦИИ ---
         elif query.data == "active_requests":
+            context.user_data['active_requests_page'] = 0
             await show_active_requests(update, context)
+        elif query.data == "req_prev":
+            page = context.user_data.get('active_requests_page', 0)
+            if page > 0:
+                context.user_data['active_requests_page'] = page - 1
+            await show_active_requests(update, context)
+        elif query.data == "req_next":
+            page = context.user_data.get('active_requests_page', 0)
+            context.user_data['active_requests_page'] = page + 1
+            await show_active_requests(update, context)
+        # --- КОНЕЦ БЛОКА ---
+
         elif query.data == "urgent_requests":
             await show_urgent_requests(update, context)
         elif query.data == "completed_requests":
@@ -2062,15 +2105,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
                 )
         elif query.data == "cancel":
-            # Сохраняем важные данные перед очисткой
             saved_user_type = context.user_data.get("user_type")
             saved_role = role
-            
-            # Частичная очистка контекста
             context.user_data.clear()
             context.user_data["user_type"] = saved_user_type
             
-            # Определяем текст в зависимости от роли
             if saved_role == SUPPORT_ROLES["admin"]:
                 welcome_text = "👑 Административное меню:"
             elif saved_role == SUPPORT_ROLES["agent"]:
@@ -2087,11 +2126,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 main_menu_keyboard(user_id, saved_role, is_in_main_menu=True, user_type=saved_user_type)
             )
         elif query.data == "back_to_main":
-            # Получаем актуальную роль на случай, если она изменилась
             current_role = await get_user_role(user_id)
             current_user_type = context.user_data.get("user_type", "unknown")
             
-            # Определяем текст в зависимости от роли
             if current_role == SUPPORT_ROLES["admin"]:
                 welcome_text = "👑 Административное меню:"
             elif current_role == SUPPORT_ROLES["agent"]:
@@ -2880,26 +2917,31 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # Update save_user_data to route to handle_name_input
 # Это твоя обновленная функция save_user_data
 
+# support_bot.py
+
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Routes user input based on the current state by checking boolean flags."""
     user_id = update.effective_user.id
-    
     logger.info(f"User {user_id} context keys: {list(context.user_data.keys())}")
     logger.info(f"User {user_id} sent text: {update.message.text}")
 
-    # Проверяем булевы флаги в контексте пользователя, чтобы определить состояние
-    
-    # Подача заявки
-    if context.user_data.get("awaiting_problem"):
-        await process_problem_report(update, context)
-    # Регистрация пользователя (когда он сам инициирует)
-    elif context.user_data.get("awaiting_name"):
+    # --- РЕГИСТРАЦИЯ РЕЗИДЕНТА (инициированная пользователем) ---
+    if context.user_data.get("awaiting_name"):
         await process_user_name(update, context)
     elif context.user_data.get("awaiting_address"):
         await process_user_address(update, context)
     elif context.user_data.get("awaiting_phone"):
         await process_user_phone(update, context)
-    # Добавление резидента админом
+
+    # --- ПОДАЧА ЗАЯВКИ ---
+    elif context.user_data.get("awaiting_problem"):
+        await process_problem_report(update, context)
+
+    # --- ЗАВЕРШЕНИЕ ЗАЯВКИ (Агент/Админ) ---
+    elif context.user_data.get("awaiting_solution"):
+        await save_solution(update, context)
+
+    # --- ДОБАВЛЕНИЕ РЕЗИДЕНТА (Админ) ---
     elif context.user_data.get("awaiting_resident_id_add"):
         await process_resident_id_add(update, context)
     elif context.user_data.get("awaiting_new_resident_name"):
@@ -2908,29 +2950,29 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_new_resident_address(update, context)
     elif context.user_data.get("awaiting_new_resident_phone"):
         await process_new_resident_phone(update, context)
-    # Удаление резидента админом
+        
+    # --- УДАЛЕНИЕ РЕЗИДЕНТА (Админ) ---
     elif context.user_data.get("awaiting_resident_id_delete"):
         await process_resident_delete(update, context)
-    # Завершение заявки агентом
-    elif context.user_data.get("awaiting_solution"):
-        await save_solution(update, context)
-    # Отправка сообщения пользователю агентом
-    elif context.user_data.get("awaiting_user_message"):
-        await send_user_message(update, context)
-    # Добавление агента админом
+
+    # --- УПРАВЛЕНИЕ СОТРУДНИКАМИ (Админ) ---
     elif context.user_data.get("awaiting_agent_id"):
         await process_new_agent(update, context)
     elif context.user_data.get("awaiting_agent_name"):
         await save_agent(update, context)
-    # Вопрос от потенциального покупателя
+
+    # --- ОТДЕЛ ПРОДАЖ ---
     elif context.user_data.get("awaiting_sales_question"):
         await process_sales_question(update, context)
-    # Ответ от агента покупателю
     elif context.user_data.get("reply_to_user"):
         await process_reply(update, context)
+        
+    # --- СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ---
+    elif context.user_data.get("awaiting_user_message"):
+        await send_user_message(update, context)
+        
     else:
-        logger.warning(f"No awaiting state found for user {user_id}. Defaulting to main menu.")
-        # Если состояние не установлено, показываем главное меню
+        logger.warning(f"No awaiting state found for user {user_id} or state is None. Defaulting to main menu.")
         await main_menu(update, context)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
