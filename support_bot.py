@@ -2018,7 +2018,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             elif saved_role == SUPPORT_ROLES["resident"]:
                 welcome_text = "🏠 Главное меню:"
             else:
-                welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
+                welcome_text = "Главное меню:" 
             
             await send_and_remember(
                 update,
