@@ -1228,7 +1228,7 @@ async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show active requests for agents."""
+    """Show active requests for agents with individual detail buttons."""
     if not await is_agent(update.effective_user.id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
@@ -1238,7 +1238,7 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category
+                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.address, r.phone
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.status = 'new'
@@ -1257,24 +1257,27 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        text = "📋 Активные заявки:\n\n"
         for req in requests:
-            text += (
-                f"🆔 Номер: #{req[0]}\n"
-                f"👤 От: {req[1]}\n"
-                f"📅 Дата: {req[3].strftime('%d.%m.%Y %H:%M')}\n"
-                f"🚨 Тип: {'Срочная' if req[4] == 'urgent' else 'Обычная'}\n"
-                f"📝 Описание: {req[2][:100]}{'...' if len(req[2]) > 100 else ''}\n\n"
+            issue_id, full_name, description, created_at, category, address, phone = req
+            text = (
+                f"🆔 Номер: #{issue_id}\n"
+                f"👤 От: {full_name}\n"
+                f"🏠 Адрес: {address}\n"
+                f"📱 Телефон: {phone}\n"
+                f"📅 Дата: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
+                f"🚨 Тип: {'Срочная' if category == 'urgent' else 'Обычная'}\n"
+                f"📝 Описание: {description[:100]}{'...' if len(description) > 100 else ''}\n"
             )
-
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
-
-        await send_and_remember(
-            update,
-            context,
-            text,
-            InlineKeyboardMarkup(keyboard),
-        )
+            keyboard = [
+                [InlineKeyboardButton("🔍 Подробности", callback_data=f"request_detail_{issue_id}")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+            ]
+            await send_and_remember(
+                update,
+                context,
+                text,
+                InlineKeyboardMarkup(keyboard),
+            )
     except psycopg2.Error as e:
         logger.error(f"Error retrieving active requests: {e}")
         await send_and_remember(
@@ -1460,7 +1463,7 @@ async def save_solution(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
 async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show urgent requests for agents."""
+    """Show urgent requests for agents with individual detail buttons."""
     if not await is_agent(update.effective_user.id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
@@ -1470,7 +1473,7 @@ async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT i.issue_id, r.full_name, i.description, i.created_at
+                SELECT i.issue_id, r.full_name, i.description, i.created_at, r.address, r.phone
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.status = 'new' AND i.category = 'urgent'
@@ -1489,23 +1492,27 @@ async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        text = "🚨 Срочные заявки:\n\n"
         for req in requests:
-            text += (
-                f"🆔 Номер: #{req[0]}\n"
-                f"👤 От: {req[1]}\n"
-                f"📅 Дата: {req[3].strftime('%d.%m.%Y %H:%M')}\n"
-                f"📝 Описание: {req[2][:100]}{'...' if len(req[2]) > 100 else ''}\n\n"
+            issue_id, full_name, description, created_at, address, phone = req
+            text = (
+                f"🆔 Номер: #{issue_id}\n"
+                f"👤 От: {full_name}\n"
+                f"🏠 Адрес: {address}\n"
+                f"📱 Телефон: {phone}\n"
+                f"📅 Дата: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
+                f"🚨 Тип: Срочная\n"
+                f"📝 Описание: {description[:100]}{'...' if len(description) > 100 else ''}\n"
             )
-
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
-
-        await send_and_remember(
-            update,
-            context,
-            text,
-            InlineKeyboardMarkup(keyboard),
-        )
+            keyboard = [
+                [InlineKeyboardButton("🔍 Подробности", callback_data=f"request_detail_{issue_id}")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+            ]
+            await send_and_remember(
+                update,
+                context,
+                text,
+                InlineKeyboardMarkup(keyboard),
+            )
     except psycopg2.Error as e:
         logger.error(f"Error retrieving urgent requests: {e}")
         await send_and_remember(
