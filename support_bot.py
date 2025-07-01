@@ -663,7 +663,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 Административное меню:",
             main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
         )
-    elif role == SUPPORT_ROLES["resident"]:
+    elif user_type == USER_TYPES["resident"]:
          # Меню для резидента не изменилось
         await send_and_remember(
             update,
