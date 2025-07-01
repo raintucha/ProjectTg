@@ -2881,38 +2881,56 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # Это твоя обновленная функция save_user_data
 
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes user input based on the current state."""
+    """Routes user input based on the current state by checking boolean flags."""
     user_id = update.effective_user.id
-    state = context.user_data.get('state') # Получаем текущее состояние
     
-    logger.info(f"User {user_id} in state '{state}' sent text: {update.message.text}")
+    logger.info(f"User {user_id} context keys: {list(context.user_data.keys())}")
+    logger.info(f"User {user_id} sent text: {update.message.text}")
 
-    # Маршрутизация на основе одного состояния
-    if state == 'awaiting_name':
-        await handle_name_input(update, context)
-    elif state == 'awaiting_address':
-        await handle_address_input(update, context)
-    elif state == 'awaiting_phone':
-        await handle_phone_input(update, context) # <-- ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ
+    # Проверяем булевы флаги в контексте пользователя, чтобы определить состояние
     
-    # Остальные состояния, которые у тебя были
-    elif state == "awaiting_problem":
+    # Подача заявки
+    if context.user_data.get("awaiting_problem"):
         await process_problem_report(update, context)
-    elif state == "awaiting_solution":
-        await save_solution(update, context)
-    elif state == "awaiting_agent_id":
-        await process_new_agent(update, context)
-    elif state == "awaiting_agent_name":
-        await save_agent(update, context)
-    elif state == "awaiting_resident_id_delete":
+    # Регистрация пользователя (когда он сам инициирует)
+    elif context.user_data.get("awaiting_name"):
+        await process_user_name(update, context)
+    elif context.user_data.get("awaiting_address"):
+        await process_user_address(update, context)
+    elif context.user_data.get("awaiting_phone"):
+        await process_user_phone(update, context)
+    # Добавление резидента админом
+    elif context.user_data.get("awaiting_resident_id_add"):
+        await process_resident_id_add(update, context)
+    elif context.user_data.get("awaiting_new_resident_name"):
+        await process_new_resident_name(update, context)
+    elif context.user_data.get("awaiting_new_resident_address"):
+        await process_new_resident_address(update, context)
+    elif context.user_data.get("awaiting_new_resident_phone"):
+        await process_new_resident_phone(update, context)
+    # Удаление резидента админом
+    elif context.user_data.get("awaiting_resident_id_delete"):
         await process_resident_delete(update, context)
-    elif state == "awaiting_sales_question":
+    # Завершение заявки агентом
+    elif context.user_data.get("awaiting_solution"):
+        await save_solution(update, context)
+    # Отправка сообщения пользователю агентом
+    elif context.user_data.get("awaiting_user_message"):
+        await send_user_message(update, context)
+    # Добавление агента админом
+    elif context.user_data.get("awaiting_agent_id"):
+        await process_new_agent(update, context)
+    elif context.user_data.get("awaiting_agent_name"):
+        await save_agent(update, context)
+    # Вопрос от потенциального покупателя
+    elif context.user_data.get("awaiting_sales_question"):
         await process_sales_question(update, context)
-    # ... и так далее для всех остальных состояний ...
-    
+    # Ответ от агента покупателю
+    elif context.user_data.get("reply_to_user"):
+        await process_reply(update, context)
     else:
-        logger.warning(f"No awaiting state for user {user_id} or state is None.")
-        # Если состояние не определено, показываем главное меню
+        logger.warning(f"No awaiting state found for user {user_id}. Defaulting to main menu.")
+        # Если состояние не установлено, показываем главное меню
         await main_menu(update, context)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
