@@ -371,7 +371,7 @@ async def confirm_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # support_bot.py
 
 # Убедитесь, что наверху файла у вас есть этот импорт
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time as dt_time
 
 async def process_report_period(
     update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str
@@ -379,17 +379,14 @@ async def process_report_period(
     """Process selected report period with correct date boundaries."""
     today = datetime.now()
     
-    # Конец сегодняшнего дня (23:59:59) для включения всех заявок за сегодня
-    end_date = datetime.combine(today, time.max)
+    # Используем dt_time.max и dt_time.min вместо time.max и time.min
+    end_date = datetime.combine(today, dt_time.max)
 
     if period_type == "7":
-        # Начало дня 7 дней назад (включая сегодняшний день)
-        start_date = datetime.combine(today - timedelta(days=6), time.min)
+        start_date = datetime.combine(today - timedelta(days=6), dt_time.min)
     elif period_type == "30":
-        # Начало дня 30 дней назад (включая сегодняшний день)
-        start_date = datetime.combine(today - timedelta(days=29), time.min)
+        start_date = datetime.combine(today - timedelta(days=29), dt_time.min)
     elif period_type == "month":
-        # Начало первого дня текущего месяца
         start_date = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     else:
         await safe_send_message(
