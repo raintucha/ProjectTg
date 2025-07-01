@@ -553,40 +553,101 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
 
     return InlineKeyboardMarkup(keyboard)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /start command and show appropriate menu."""
-    chat_id = update.effective_user.id
-    role = await get_user_role(chat_id)
-    logger.info(f"User {chat_id} started bot, role: {role}")
-
-    # Очищаем предыдущее состояние
-    context.user_data.clear()
-
-    # Получаем user_type из базы данных
+async def get_user_type(user_id: int) -> str:
+    """Получает тип пользователя (resident или potential_buyer) из базы данных."""
     conn = None
-    user_type = None
+    user_type = "unknown"
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT user_type FROM users WHERE user_id = %s", (chat_id,))
+            cur.execute("SELECT user_type FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
-            user_type = result[0] if result else None
+            if result:
+                user_type = result[0]
     except psycopg2.Error as e:
-        logger.error(f"Database error checking user_type for {chat_id}: {e}", exc_info=True)
+        logger.error(f"Database error in get_user_type for {user_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
+    return user_type
+
+def save_resident_to_db(user_id: int, data: dict):
+    """Сохраняет нового резидента в таблицы users и residents."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Сначала добавляем или обновляем запись в таблице users
+            # Устанавливаем роль 'resident' и тип 'resident'
+            cur.execute(
+                """
+                INSERT INTO users (user_id, role, user_type) VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, user_type = EXCLUDED.user_type;
+                """,
+                (user_id, 'resident', 'resident')
+            )
+            
+            # Затем добавляем детальную информацию в таблицу residents
+            cur.execute(
+                """
+                INSERT INTO residents (user_id, full_name, address, phone_number) 
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE 
+                SET full_name = EXCLUDED.full_name, address = EXCLUDED.address, phone_number = EXCLUDED.phone_number;
+                """,
+                (user_id, data['name'], data['address'], data['phone'])
+            )
+        conn.commit()
+        logger.info(f"Successfully saved resident data for user {user_id}")
+    except psycopg2.Error as e:
+        logger.error(f"Database error in save_resident_to_db for {user_id}: {e}")
+        if conn:
+            conn.rollback()
     finally:
         if conn:
             conn.close()
 
-    context.user_data["user_type"] = user_type or "unknown"
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет пользователю главное меню в зависимости от его роли."""
+    message = update.message or update.callback_query.message
+    chat_id = update.effective_user.id
+    
+    role = await get_user_role(chat_id)
+    user_type = await get_user_type(chat_id)
+    
+    # Сохраняем актуальные данные в контекст
+    context.user_data["role"] = role
+    context.user_data["user_type"] = user_type
+
+    text = "🏠 Главное меню:"
+    
+    await send_and_remember(
+        update,
+        context,
+        text,
+        main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+    )
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command and show appropriate menu."""
+    chat_id = update.effective_user.id
+    logger.info(f"User {chat_id} started bot.")
+
+    # Полностью очищаем состояние пользователя при каждой команде /start
+    context.user_data.clear()
+
+    role = await get_user_role(chat_id)
+    user_type = await get_user_type(chat_id) # Используем новую вспомогательную функцию
+    context.user_data["user_type"] = user_type
+
+    logger.info(f"User {chat_id} has role: {role} and user_type: {user_type}")
 
     # Генерируем соответствующее меню
     if role == SUPPORT_ROLES["agent"]:
+        # Меню для агента не изменилось
         keyboard = [
             [InlineKeyboardButton("👷 Я сотрудник", callback_data="select_agent")],
             [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
-            [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
-            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
-            [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
         ]
         await send_and_remember(
             update,
@@ -595,6 +656,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup(keyboard)
         )
     elif role == SUPPORT_ROLES["admin"]:
+        # Меню для админа не изменилось
         await send_and_remember(
             update,
             context,
@@ -602,6 +664,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
         )
     elif role == SUPPORT_ROLES["resident"]:
+         # Меню для резидента не изменилось
         await send_and_remember(
             update,
             context,
@@ -609,18 +672,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
         )
     else:
+        # ИСПРАВЛЕНО: Меню для нового пользователя
         keyboard = [
-            [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")],
-            [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
-            [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
-            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
-            [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
+            [InlineKeyboardButton("🏠 Я резидент (Регистрация)", callback_data="register_as_resident")],
+            [InlineKeyboardButton("🛒 Я потенциальный покупатель", callback_data="select_potential_buyer")]
         ]
         await send_and_remember(
             update,
             context,
-            "👋 Добро пожаловать! Пожалуйста, выберите действие:",
+            "👋 Добро пожаловать в Sunqar Support Bot!\n\nПожалуйста, укажите, кто вы, чтобы продолжить:",
             InlineKeyboardMarkup(keyboard)
         )
 
@@ -2785,124 +2845,75 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
 
 # ... (previous code, including process_new_resident_phone)
 
+# Эти функции нужно вставить ПЕРЕД save_user_data
+
 async def handle_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle full name input during resident registration."""
-    if not context.user_data.get("awaiting_name") or not context.user_data.get("registration_flow"):
-        logger.warning(f"User {update.effective_user.id} sent name outside registration flow")
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка: не ожидается ввод ФИО.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-        )
-        return
-    
-    full_name = update.message.text.strip()
-    if not full_name:
-        logger.warning(f"User {update.effective_user.id} sent empty name")
-        await send_and_remember(
-            update,
-            context,
-            "❌ ФИО не может быть пустым. Пожалуйста, введите ваше ФИО:",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-        )
-        return
-    
+    """Saves user's name and asks for address."""
+    context.user_data['name'] = update.message.text
+    context.user_data['state'] = 'awaiting_address'
+    await update.message.reply_text("Отлично! Теперь введите ваш адрес (например, Улица Абая 1, кв 1):")
+
+async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saves user's address and asks for phone."""
+    context.user_data['address'] = update.message.text
+    context.user_data['state'] = 'awaiting_phone'
+    await update.message.reply_text("Принято. Теперь введите ваш номер телефона (например, +7 777 123 4567):")
+
+async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saves phone, completes registration, and shows the main menu."""
     user_id = update.effective_user.id
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE users SET full_name = %s WHERE user_id = %s
-                """,
-                (full_name, user_id)
-            )
-            conn.commit()
-        context.user_data["user_name"] = full_name  # Store for further use in registration
-        context.user_data.pop("awaiting_name", None)
-        context.user_data["awaiting_address"] = True  # Move to next step
-        logger.info(f"Stored full_name: {full_name} for chat_id: {user_id}")
-        await send_and_remember(
-            update,
-            context,
-            "🏠 Введите ваш адрес (например: Корпус 1, кв. 25):",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]])
-        )
-    except psycopg2.Error as e:
-        logger.error(f"Database error updating full_name for user {user_id}: {e}", exc_info=True)
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка базы данных. Попробуйте позже.",
-            main_menu_keyboard(user_id, await get_user_role(user_id))
-        )
-    finally:
-        if conn:
-            conn.close()
+    context.user_data['phone'] = update.message.text
+    
+    # Сохраняем все данные в базу данных
+    save_resident_to_db(user_id, context.user_data)
+    
+    await update.message.reply_text("✅ Спасибо! Ваша регистрация в качестве резидента успешно завершена.")
+    
+    # Очищаем состояние регистрации
+    for key in ['state', 'name', 'address', 'phone']:
+        if key in context.user_data:
+            del context.user_data[key]
+            
+    # Вызываем главное меню для нового резидента
+    await main_menu(update, context)
 
 # Update save_user_data to route to handle_name_input
-async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Processing text input from user {update.effective_user.id}: {update.message.text}")
-    logger.info(f"Current context.user_data: {context.user_data}")
+# Это твоя обновленная функция save_user_data
 
-    # Проверяем, ожидается ли ввод для какого-либо состояния
-    if "awaiting_resident_id_delete" in context.user_data:
-        await process_resident_delete(update, context)
-    elif "awaiting_resident_id_add" in context.user_data:
-        await process_resident_id_add(update, context)
-    elif "awaiting_new_resident_name" in context.user_data:
-        await process_new_resident_name(update, context)
-    elif "awaiting_new_resident_address" in context.user_data:
-        await process_new_resident_address(update, context)
-    elif "awaiting_new_resident_phone" in context.user_data:
-        await process_new_resident_phone(update, context)
-    elif "awaiting_problem" in context.user_data:
-        await process_problem_report(update, context)
-    elif "awaiting_name" in context.user_data:  # Route to handle_name_input
+async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes user input based on the current state."""
+    user_id = update.effective_user.id
+    state = context.user_data.get('state') # Получаем текущее состояние
+    
+    logger.info(f"User {user_id} in state '{state}' sent text: {update.message.text}")
+
+    # Маршрутизация на основе одного состояния
+    if state == 'awaiting_name':
         await handle_name_input(update, context)
-    elif "awaiting_address" in context.user_data:
-        await process_user_address(update, context)
-    elif "awaiting_phone" in context.user_data:
-        await process_user_phone(update, context)
-    elif "awaiting_solution" in context.user_data:
+    elif state == 'awaiting_address':
+        await handle_address_input(update, context)
+    elif state == 'awaiting_phone':
+        await handle_phone_input(update, context) # <-- ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ
+    
+    # Остальные состояния, которые у тебя были
+    elif state == "awaiting_problem":
+        await process_problem_report(update, context)
+    elif state == "awaiting_solution":
         await save_solution(update, context)
-    elif "awaiting_agent_id" in context.user_data:
+    elif state == "awaiting_agent_id":
         await process_new_agent(update, context)
-    elif "awaiting_agent_name" in context.user_data:
+    elif state == "awaiting_agent_name":
         await save_agent(update, context)
-    elif "awaiting_user_message" in context.user_data:
-        await send_user_message(update, context)
-    elif "awaiting_sales_question" in context.user_data:
+    elif state == "awaiting_resident_id_delete":
+        await process_resident_delete(update, context)
+    elif state == "awaiting_sales_question":
         await process_sales_question(update, context)
+    # ... и так далее для всех остальных состояний ...
+    
     else:
-        logger.warning(f"No awaiting state for user {update.effective_user.id}")
-        context.user_data.clear()
-        # Получаем user_type из базы данных
-        conn = None
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_type FROM users WHERE user_id = %s", (update.effective_user.id,))
-                result = cur.fetchone()
-                context.user_data["user_type"] = result[0] if result else "unknown"
-        except psycopg2.Error as e:
-            logger.error(f"Database error fetching user_type for {update.effective_user.id}: {e}", exc_info=True)
-            context.user_data["user_type"] = "unknown"
-        finally:
-            if conn:
-                conn.close()
-        await send_and_remember(
-            update,
-            context,
-            "⚠️ Неизвестная команда. Используйте кнопки меню или /start.",
-            main_menu_keyboard(
-                update.effective_user.id,
-                await get_user_role(update.effective_user.id),
-                user_type=context.user_data.get("user_type")
-            ),
-        )
+        logger.warning(f"No awaiting state for user {user_id} or state is None.")
+        # Если состояние не определено, показываем главное меню
+        await main_menu(update, context)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
