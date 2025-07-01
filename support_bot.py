@@ -368,17 +368,29 @@ async def confirm_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import sys
     sys.exit(0)
 
+# support_bot.py
+
+# Убедитесь, что наверху файла у вас есть этот импорт
+from datetime import datetime, timedelta, time
+
 async def process_report_period(
     update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str
 ):
-    """Process selected report period."""
-    end_date = datetime.now()
+    """Process selected report period with correct date boundaries."""
+    today = datetime.now()
+    
+    # Конец сегодняшнего дня (23:59:59) для включения всех заявок за сегодня
+    end_date = datetime.combine(today, time.max)
+
     if period_type == "7":
-        start_date = end_date - timedelta(days=7)
+        # Начало дня 7 дней назад (включая сегодняшний день)
+        start_date = datetime.combine(today - timedelta(days=6), time.min)
     elif period_type == "30":
-        start_date = end_date - timedelta(days=30)
+        # Начало дня 30 дней назад (включая сегодняшний день)
+        start_date = datetime.combine(today - timedelta(days=29), time.min)
     elif period_type == "month":
-        start_date = end_date.replace(day=1)
+        # Начало первого дня текущего месяца
+        start_date = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     else:
         await safe_send_message(
             update,
@@ -387,6 +399,8 @@ async def process_report_period(
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
         return
+        
+    logger.info(f"Generating report for period from {start_date} to {end_date}")
     await generate_and_send_report(update, context, start_date, end_date)
 
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
