@@ -1999,9 +1999,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
         elif query.data == "cancel":
             context.user_data.clear()
-            context.user_data["user_type"] = USER_TYPES.get("resident", "unknown")
+            context.user_data["user_type"] = context.user_data.get("user_type")  # Preserve user_type if it exists
             logger.info(f"User {user_id} cancelled action")
-            await start(update, context)
+            await send_and_remember(
+                update,
+                context,
+                "🏠 Главное меню:" if role == SUPPORT_ROLES["resident"] and user_type == USER_TYPES["resident"] else
+                "👷 Панель сотрудника:" if role == SUPPORT_ROLES["agent"] else
+                "👑 Административное меню:" if role == SUPPORT_ROLES["admin"] else
+                "👋 Добро пожаловать! Пожалуйста, выберите действие:",
+                main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
+            )
         elif query.data == "back_to_main":
             user_type = context.user_data.get("user_type")
             await send_and_remember(
