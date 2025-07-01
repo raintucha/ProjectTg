@@ -485,15 +485,15 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
     """Generate the main menu keyboard based on user role and user_type."""
     keyboard = []
 
-    # Fetch user_type from database if not provided
-    if user_type is None:
+    # Fetch user_type from database if not provided (only if user exists)
+    if user_type is None and role is not None:
         conn = None
         try:
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute("SELECT user_type FROM users WHERE user_id = %s", (user_id,))
                 result = cur.fetchone()
-                user_type = result[0] if result else None  # Set to None for new users instead of "unknown"
+                user_type = result[0] if result else None
         except psycopg2.Error as e:
             logger.error(f"Database error fetching user_type for {user_id}: {e}", exc_info=True)
             user_type = None
@@ -501,14 +501,14 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             if conn:
                 conn.close()
 
-    # New users (no role or user_type) get only registration options
-    if role is None or user_type is None:
+    # New/unregistered users (no role or user_type)
+    if role is None or (role == SUPPORT_ROLES["user"] and user_type is None):
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-            [InlineKeyboardButton("🛒 Зарегистрироваться как потенциальный покупатель", callback_data="select_potential_buyer")]
+            [InlineKeyboardButton("🛒 Зарегистрироваться как покупатель", callback_data="select_potential_buyer")]
         ])
 
-    # Admin menu
+    # Admin menu (priority over user_type)
     if role == SUPPORT_ROLES["admin"]:
         keyboard = [
             [InlineKeyboardButton("📝 Добавить резидента", callback_data="add_resident")],
@@ -520,6 +520,7 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
             [InlineKeyboardButton("🛑 Остановить бота", callback_data="shutdown_bot")]
         ]
+    
     # Agent menu
     elif role == SUPPORT_ROLES["agent"]:
         keyboard = [
@@ -528,23 +529,26 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
             [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
         ]
-    # Resident menu (based on user_type, since role might not be correctly set)
+    
+    # Resident menu (checked by user_type)
     elif user_type == USER_TYPES["resident"]:
         keyboard = [
             [InlineKeyboardButton("📝 Новая заявка", callback_data="new_request")],
             [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
             [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
         ]
+    
     # Potential buyer menu
     elif user_type == USER_TYPES["potential_buyer"]:
         keyboard = [
             [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
             [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
-            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
+            [InlineKeyboardButton("📞 Связаться с продажами", callback_data="sales_team")],
             [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
         ]
 
-    if not is_in_main_menu:
+    # Add back button if not in main menu and keyboard exists
+    if not is_in_main_menu and keyboard:
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
 
     return InlineKeyboardMarkup(keyboard)
@@ -1998,27 +2002,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
                 )
         elif query.data == "cancel":
+            # Сохраняем важные данные перед очисткой
+            saved_user_type = context.user_data.get("user_type")
+            saved_role = role
+            
+            # Частичная очистка контекста
             context.user_data.clear()
-            context.user_data["user_type"] = context.user_data.get("user_type")  # Preserve user_type if it exists
-            logger.info(f"User {user_id} cancelled action")
+            context.user_data["user_type"] = saved_user_type
+            
+            # Определяем текст в зависимости от роли
+            if saved_role == SUPPORT_ROLES["admin"]:
+                welcome_text = "👑 Административное меню:"
+            elif saved_role == SUPPORT_ROLES["agent"]:
+                welcome_text = "👷 Панель сотрудника:"
+            elif saved_role == SUPPORT_ROLES["resident"]:
+                welcome_text = "🏠 Главное меню:"
+            else:
+                welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
+            
             await send_and_remember(
                 update,
                 context,
-                "🏠 Главное меню:" if role == SUPPORT_ROLES["resident"] and user_type == USER_TYPES["resident"] else
-                "👷 Панель сотрудника:" if role == SUPPORT_ROLES["agent"] else
-                "👑 Административное меню:" if role == SUPPORT_ROLES["admin"] else
-                "👋 Добро пожаловать! Пожалуйста, выберите действие:",
-                main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
+                welcome_text,
+                main_menu_keyboard(user_id, saved_role, is_in_main_menu=True, user_type=saved_user_type)
             )
         elif query.data == "back_to_main":
-            user_type = context.user_data.get("user_type")
+            # Получаем актуальную роль на случай, если она изменилась
+            current_role = await get_user_role(user_id)
+            current_user_type = context.user_data.get("user_type", "unknown")
+            
+            # Определяем текст в зависимости от роли
+            if current_role == SUPPORT_ROLES["admin"]:
+                welcome_text = "👑 Административное меню:"
+            elif current_role == SUPPORT_ROLES["agent"]:
+                welcome_text = "👷 Панель сотрудника:"
+            elif current_role == SUPPORT_ROLES["resident"]:
+                welcome_text = "🏠 Главное меню:"
+            else:
+                welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
+            
             await send_and_remember(
                 update,
                 context,
-                "👑 Панель сотрудника:" if role == SUPPORT_ROLES["agent"] else
-                "👑 Административное меню:" if role == SUPPORT_ROLES["admin"] else
-                "🏠 Главное меню:",
-                main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
+                welcome_text,
+                main_menu_keyboard(user_id, current_role, is_in_main_menu=True, user_type=current_user_type)
             )
         else:
             logger.warning(f"Unknown command: {query.data}")
@@ -2026,7 +2053,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 update,
                 context,
                 "⚠️ Команда не распознана",
-                main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type"))
+                main_menu_keyboard(user_id, role, user_type=user_type)
             )
     except psycopg2.Error as e:
         logger.error(f"Database error in button_handler for user {user_id}: {e}", exc_info=True)
@@ -2034,7 +2061,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             f"❌ Ошибка базы данных: {e}",
-            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type"))
+            main_menu_keyboard(user_id, role, user_type=user_type)
         )
     except Exception as e:
         logger.error(f"Unexpected error in button_handler for user {user_id}: {e}", exc_info=True)
@@ -2042,7 +2069,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             context,
             f"❌ Ошибка: {e}",
-            main_menu_keyboard(user_id, role, user_type=context.user_data.get("user_type"))
+            main_menu_keyboard(user_id, role, user_type=user_type)
         )
         
 async def show_agent_info(
