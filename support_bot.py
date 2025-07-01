@@ -554,7 +554,7 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
         keyboard = [
             [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
             [InlineKeyboardButton("🏠 Цены на жилье", callback_data="pricing_info")],
-            [InlineKeyboardButton("📞 Связаться с продажами", callback_data="sales_team")],
+            [InlineKeyboardButton("📞 Связаться с отделом продаж", callback_data="sales_team")],
             [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
         ]
 
@@ -2410,8 +2410,8 @@ async def show_sales_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = (
         "👥 Отдел продаж ЖК Сункар:\n\n"
-        "1. Иван Иванов – @IvanSales – +7 777 123 4567\n"
-        "2. Анна Смирнова – @AnnaSales – +7 777 987 6543\n\n"
+        "1. Арман @ArmanSales – +7 777 123 4567\n"
+        "2. Второй сотрудник – @AnnaSales – +7 777 987 6543\n\n"
         "📞 Свяжитесь напрямую или задайте вопрос здесь:"
     )
     keyboard = [
