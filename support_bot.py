@@ -16,7 +16,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 import psycopg2
-from fpdf import FPDF
+from fpdf import FPDF # fpdf2 использует тот же синтаксис импорта для совместимости
 from io import BytesIO
 import asyncio
 from threading import Thread
@@ -162,20 +162,6 @@ def init_db():
     finally:
         if conn:
             release_db_connection(conn)
-
-def get_db_connection():
-    """Get a connection from the pool."""
-    global db_pool
-    if db_pool is None:
-        logger.error("Database connection pool not initialized")
-        raise Exception("Database connection pool not initialized")
-    try:
-        conn = db_pool.getconn()
-        logger.info("Retrieved connection from pool")
-        return conn
-    except psycopg2.Error as e:
-        logger.error(f"Database connection error: {e}")
-        raise
 
 def release_db_connection(conn):
     """Release a connection back to the pool."""
@@ -2017,7 +2003,7 @@ def generate_pdf_report(start_date, end_date):
     conn = None
     try:
         # Подключение шрифта
-        font_path = "DejaVuSans.ttf"
+        font_path = "fonts/DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found, using default font")
             pdf.set_font("Arial", "", 10)  # Fallback to a built-in font
@@ -2368,51 +2354,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await show_active_requests(update, context)
         elif query.data == "add_agent":
             await add_agent(update, context)
-        elif query.data.startswith("confirm_delete_"):
-            resident_chat_id = await validate_chat_id(query.data.split("_")[2], update, context)
-            if "resident_to_delete" in context.user_data and context.user_data["resident_to_delete"]["chat_id"] == resident_chat_id:
-                full_name = context.user_data["resident_to_delete"]["full_name"]
-                resident_id = context.user_data["resident_to_delete"]["resident_id"]
-                conn = None
-                try:
-                    conn = get_db_connection()
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT COUNT(*) FROM issues WHERE resident_id = %s", (resident_id,))
-                        issue_count = cur.fetchone()[0]
-                        cur.execute("SELECT COUNT(*) FROM issue_logs WHERE issue_id IN (SELECT issue_id FROM issues WHERE resident_id = %s)", (resident_id,))
-                        log_count = cur.fetchone()[0]
-                        cur.execute("DELETE FROM residents WHERE chat_id = %s", (resident_chat_id,))
-                        cur.execute("DELETE FROM users WHERE user_id = %s", (resident_chat_id,))
-                        conn.commit()
-                        await send_and_remember(
-                            update,
-                            context,
-                            f"✅ Резидент {full_name} (chat ID: {resident_chat_id}) успешно удалён.\n"
-                            f"Удалено заявок: {issue_count}, логов: {log_count}",
-                            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-                        )
-                        logger.info(f"Admin {update.effective_user.id} deleted resident {resident_chat_id} (resident_id: {resident_id})")
-                except psycopg2.Error as e:
-                    logger.error(f"Database error deleting resident {resident_chat_id}: {e}", exc_info=True)
-                    if conn:
-                        conn.rollback()
-                    await send_and_remember(
-                        update,
-                        context,
-                        f"❌ Ошибка базы данных при удалении резидента: {e}",
-                        main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-                    )
-                finally:
-                    context.user_data.clear()
-                    if conn:
-                        release_db_connection(conn)
-            else:
-                await send_and_remember(
-                    update,
-                    context,
-                    "❌ Ошибка: данные для удаления не найдены.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
-                )
         elif query.data == "cancel":
             saved_user_type = context.user_data.get("user_type")
             saved_role = role
