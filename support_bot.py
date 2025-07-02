@@ -14,6 +14,8 @@ from telegram.ext import (
     filters,
     ContextTypes,
     CallbackQueryHandler,
+    JobQueue,  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+
 )
 import psycopg2
 from fpdf import FPDF # fpdf2 использует тот же синтаксис импорта для совместимости
@@ -3297,7 +3299,12 @@ def main() -> None:
         try:
             health_server_thread = start_health_server()
             logger.info("🔄 Initializing bot...")
-            application = Application.builder().token(TELEGRAM_TOKEN).build()
+            application = (
+                 Application.builder()
+                .token(TELEGRAM_TOKEN)
+                .job_queue(JobQueue())  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+                .build()
+            )
 
             # Add handlers
             application.add_handler(CommandHandler("start", start))
