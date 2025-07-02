@@ -2002,15 +2002,16 @@ def generate_pdf_report(start_date, end_date):
     pdf = FPDF()
     conn = None
     try:
+        pdf.add_page()
         # Подключение шрифта
         font_path = "fonts/DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found, using default font")
-            pdf.set_font("Arial", "", 10)  # Fallback to a built-in font
+            pdf.set_font("Arial", "B", 16)  # Fallback to a built-in font
         else:
             pdf.add_font("DejaVuSans", "", font_path, uni=True)
             pdf.add_font("DejaVuSans", "B", font_path, uni=True)
-            pdf.set_font("DejaVuSans", "", 10)
+            pdf.set_font("DejaVuSans", "B", 16)
 
         # Подключение к базе
         conn = get_db_connection()
@@ -2042,7 +2043,6 @@ def generate_pdf_report(start_date, end_date):
                 return str(text)[:max_length]
 
         # Заголовок
-        pdf.add_page()
         pdf.set_font("DejaVuSans", "B", 16)
         pdf.cell(0, 10, txt="Отчет по заявкам ЖК", ln=1, align="C")
         pdf.set_font("DejaVuSans", "", 12)
