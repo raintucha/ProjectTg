@@ -48,7 +48,7 @@ def init_db_pool():
     retries = int(os.getenv("DB_RETRIES", 3))
     delay = int(os.getenv("DB_RETRY_DELAY", 5))
     minconn = int(os.getenv("DB_MINCONN", 2))
-    maxconn = int(os.getenv("DB_MAXCONN", 20))
+    maxconn = int(os.getenv("DB_MAXCONN", 10))
 
     for attempt in range(retries):
         try:
@@ -2000,23 +2000,22 @@ import psycopg2
 logger = logging.getLogger(__name__)
 
 def generate_pdf_report(start_date, end_date):
-    """Generate properly aligned PDF report"""
     pdf = FPDF()
     conn = None
     try:
         pdf.add_page()
-        # Подключение шрифта
         font_path = "fonts/DejaVuSans.ttf"
         if not os.path.exists(font_path):
             logger.error(f"Font file {font_path} not found, using default font")
-            pdf.set_font("Arial", "B", 16)  # Fallback to a built-in font
+            pdf.set_font("Arial", "B", 16)
         else:
             pdf.add_font("DejaVuSans", "", font_path, uni=True)
             pdf.add_font("DejaVuSans", "B", font_path, uni=True)
             pdf.set_font("DejaVuSans", "B", 16)
 
-        # Подключение к базе
+        logger.info("Attempting to get database connection")
         conn = get_db_connection()
+        logger.info("Database connection established")
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -2031,6 +2030,12 @@ def generate_pdf_report(start_date, end_date):
                 (start_date, end_date),
             )
             issues = cur.fetchall()
+            logger.info(f"Fetched {len(issues)} issues for report")
+
+        if not issues:
+            logger.warning(f"No issues found for period {start_date} to {end_date}")
+            pdf.set_font("DejaVuSans", "", 12)
+            pdf.cell(0, 10, txt="Нет заявок за указанный период", ln=1, align="C")
 
         def clean_text(text, max_length=300):
             """Очистка текста"""
