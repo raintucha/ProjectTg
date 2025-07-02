@@ -115,7 +115,7 @@ def init_db():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS residents (
                     resident_id SERIAL PRIMARY KEY,
-                    chat_id BIGINT NOT NULL,
+                    chat_id BIGINT NOT NULL UNIQUE, 
                     full_name TEXT NOT NULL,
                     address TEXT NOT NULL,
                     phone TEXT NOT NULL,
