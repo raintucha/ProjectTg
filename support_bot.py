@@ -2,7 +2,9 @@ import telegram  # Добавьте эту строку в импорты
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+import psycopg2.pool
+from validate_chat_id import validate_chat_id
+from datetime import datetime, timedelta, timezone, time as dt_time
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -29,9 +31,28 @@ PORT = int(os.getenv("PORT", 8080))
 # Load configuration
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DIRECTOR_CHAT_ID = os.getenv("DIRECTOR_CHAT_ID")
+from validate_chat_id import validate_director_chat_id
+import os
+
+DIRECTOR_CHAT_ID = validate_director_chat_id(os.getenv("DIRECTOR_CHAT_ID"))
 NEWS_CHANNEL = os.getenv("NEWS_CHANNEL", "@sunqar_news")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+db_pool = None
+
+def init_db_pool():
+    """Initialize the database connection pool."""
+    global db_pool
+    try:
+        db_pool = psycopg2.pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
+            dsn=DATABASE_URL
+        )
+        logger.info("Database connection pool initialized")
+    except psycopg2.Error as e:
+        logger.error(f"Failed to initialize database connection pool: {e}")
+        raise
 
 # Validate environment variables
 if not TELEGRAM_TOKEN or not DIRECTOR_CHAT_ID or not DATABASE_URL:
@@ -52,24 +73,22 @@ logger = logging.getLogger(__name__)
 SUPPORT_ROLES = {"user": 1, "agent": 2, "admin": 3, "resident": 4}
 USER_TYPES = {"resident": "resident", "potential_buyer": "potential_buyer"}
 def init_db():
-    """Initialize database tables if they don't exist."""
+    """Initialize database tables and connection pool."""
+    init_db_pool()
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Создание таблицы users с user_type
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     full_name TEXT NOT NULL,
                     role INTEGER NOT NULL,
-                    user_type VARCHAR(50),  -- Added user_type column
+                    user_type VARCHAR(50),
                     registration_date TIMESTAMP NOT NULL
                 )
             """)
-            
-            # Создание таблицы residents
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS residents (
                     resident_id SERIAL PRIMARY KEY,
@@ -80,36 +99,39 @@ def init_db():
                     registration_date TIMESTAMP NOT NULL
                 )
             """)
-            
-            # Создание таблицы issues
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS issues (
                     issue_id SERIAL PRIMARY KEY,
-                    resident_id INTEGER NOT NULL REFERENCES residents(resident_id),
+                    resident_id INTEGER NOT NULL,
                     description TEXT NOT NULL,
                     category TEXT NOT NULL,
                     status TEXT NOT NULL,
                     solution TEXT,
                     created_at TIMESTAMP NOT NULL,
                     completed_at TIMESTAMP,
-                    closed_by BIGINT REFERENCES users(user_id)
+                    closed_by BIGINT,
+                    FOREIGN KEY (resident_id) REFERENCES residents(resident_id),
+                    FOREIGN KEY (closed_by) REFERENCES users(user_id)
                 )
             """)
-            
-            # Создание таблицы issue_logs
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS issue_logs (
                     log_id SERIAL PRIMARY KEY,
-                    issue_id INTEGER NOT NULL REFERENCES issues(issue_id),
+                    issue_id INTEGER NOT NULL,
                     action TEXT NOT NULL,
-                    user_id BIGINT NOT NULL REFERENCES users(user_id),
+                    user_id BIGINT NOT NULL,
                     details TEXT,
-                    action_time TIMESTAMP NOT NULL
+                    action_time TIMESTAMP NOT NULL,
+                    FOREIGN KEY (issue_id) REFERENCES issues(issue_id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
             """)
-            
+            # Добавляем индексы для оптимизации
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_residents_chat_id ON residents(chat_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status)")
             conn.commit()
-            logger.info("Database tables initialized")
+            logger.info("Database tables and indexes initialized")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         if conn:
@@ -117,20 +139,38 @@ def init_db():
         raise
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 def get_db_connection():
-    """Establish database connection using DATABASE_URL."""
+    """Get a connection from the pool."""
+    global db_pool
+    if db_pool is None:
+        logger.error("Database connection pool not initialized")
+        raise Exception("Database connection pool not initialized")
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        logger.info("Successfully connected to database")
+        conn = db_pool.getconn()
+        logger.info("Retrieved connection from pool")
         return conn
     except psycopg2.Error as e:
         logger.error(f"Database connection error: {e}")
         raise
 
-async def get_user_role(user_id: int) -> int:
-    """Retrieve user role from database."""
+def release_db_connection(conn):
+    """Release a connection back to the pool."""
+    global db_pool
+    if db_pool is None or conn is None:
+        return
+    try:
+        db_pool.putconn(conn)
+        logger.info("Released connection back to pool")
+    except psycopg2.Error as e:
+        logger.error(f"Error releasing connection to pool: {e}")
+
+async def get_user_role(user_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> int:
+    if context and "cached_role" in context.user_data and context.user_data["cached_role_user_id"] == user_id:
+        logger.debug(f"Using cached role for user {user_id}: {context.user_data['cached_role']}")
+        return context.user_data["cached_role"]
+
     if str(user_id) == DIRECTOR_CHAT_ID:
         conn = None
         try:
@@ -146,13 +186,16 @@ async def get_user_role(user_id: int) -> int:
                 )
                 conn.commit()
                 logger.info(f"Auto-registered director {user_id} as admin")
+                if context:
+                    context.user_data["cached_role"] = SUPPORT_ROLES["admin"]
+                    context.user_data["cached_role_user_id"] = user_id
                 return SUPPORT_ROLES["admin"]
         except psycopg2.Error as e:
             logger.error(f"Database error auto-registering director {user_id}: {e}", exc_info=True)
-            return SUPPORT_ROLES["admin"]  # Return admin role even on error for director
+            return SUPPORT_ROLES["admin"]
         finally:
             if conn:
-                conn.close()
+                release_db_connection(conn)
 
     conn = None
     try:
@@ -160,25 +203,27 @@ async def get_user_role(user_id: int) -> int:
         with conn.cursor() as cur:
             cur.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
-            if result:
-                return result[0]  # Return role as integer
-            # Insert new user with default role if not found
-            cur.execute(
-                """
-                INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO NOTHING
-                """,
-                (user_id, None, "Unknown", SUPPORT_ROLES["user"], None, datetime.now(timezone.utc))
-            )
-            conn.commit()
-            return SUPPORT_ROLES["user"]  # Default to user role (1)
+            role = result[0] if result else SUPPORT_ROLES["user"]
+            if not result:
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    (user_id, None, "Unknown", SUPPORT_ROLES["user"], None, datetime.now(timezone.utc))
+                )
+                conn.commit()
+            if context:
+                context.user_data["cached_role"] = role
+                context.user_data["cached_role_user_id"] = user_id
+            return role
     except psycopg2.Error as e:
         logger.error(f"Database error getting role for user_id {user_id}: {e}", exc_info=True)
         return SUPPORT_ROLES["user"]
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def is_admin(user_id: int) -> bool:
     """Check if user is an admin."""
@@ -360,11 +405,16 @@ async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def confirm_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clean shutdown of the bot."""
     if not await is_admin(update.effective_user.id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
     await safe_send_message(update, context, "🛑 Бот останавливается...")
+    global db_pool
+    if db_pool:
+        db_pool.closeall()
+        logger.info("Database connection pool closed")
+    stop_health_server()
+    await context.application.stop()  # Stop the application
     import sys
     sys.exit(0)
 
@@ -490,7 +540,144 @@ async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
+
+async def promote_demote_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiate process to promote or demote a user."""
+    if not await is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
+        return
+    await send_and_remember(
+        update,
+        context,
+        "👤 Введите Telegram ID пользователя для изменения роли:",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="manage_agents")]])
+    )
+    context.user_data["awaiting_promote_user_id"] = True
+
+async def process_promote_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process user ID for role change and prompt for new role."""
+    if not context.user_data.get("awaiting_promote_user_id"):
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается ввод ID пользователя.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+        return
+
+    user_id_input = update.message.text.strip()
+    try:
+        user_id = int(user_id_input)
+        if user_id == update.effective_user.id:
+            await send_and_remember(
+                update,
+                context,
+                "❌ Нельзя изменить собственную роль.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="manage_agents")]])
+            )
+            return
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT full_name, role FROM users WHERE user_id = %s", (user_id,))
+                user_data = cur.fetchone()
+                if not user_data:
+                    await send_and_remember(
+                        update,
+                        context,
+                        f"❌ Пользователь с ID {user_id} не найден.",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="manage_agents")]])
+                    )
+                    return
+                full_name, current_role = user_data
+                context.user_data["promote_user_id"] = user_id
+                context.user_data["promote_user_name"] = full_name
+        finally:
+            release_db_connection(conn)
+
+        keyboard = [
+            [InlineKeyboardButton("👷 Агент", callback_data="set_role_agent")],
+            [InlineKeyboardButton("👑 Админ", callback_data="set_role_admin")],
+            [InlineKeyboardButton("🙍‍♂️ Пользователь", callback_data="set_role_user")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="manage_agents")]
+        ]
+        await send_and_remember(
+            update,
+            context,
+            f"👤 Пользователь: {full_name} (ID: {user_id})\nТекущая роль: {current_role}\nВыберите новую роль:",
+            InlineKeyboardMarkup(keyboard)
+        )
+        context.user_data.pop("awaiting_promote_user_id", None)
+        context.user_data["awaiting_role_selection"] = True
+    except ValueError:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Неверный формат ID. Введите числовой Telegram ID.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="manage_agents")]])
+        )
+
+async def set_user_role(update: Update, context: ContextTypes.DEFAULT_TYPE, new_role: str):
+    """Set new role for the user."""
+    if not context.user_data.get("awaiting_role_selection"):
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка: не ожидается выбор роли.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+        return
+
+    user_id = context.user_data.get("promote_user_id")
+    full_name = context.user_data.get("promote_user_name")
+    role_map = {
+        "set_role_agent": SUPPORT_ROLES["agent"],
+        "set_role_admin": SUPPORT_ROLES["admin"],
+        "set_role_user": SUPPORT_ROLES["user"]
+    }
+    new_role_value = role_map.get(new_role)
+    if not new_role_value:
+        await send_and_remember(
+            update,
+            context,
+            "❌ Неверная роль.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+        return
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET role = %s WHERE user_id = %s",
+                (new_role_value, user_id)
+            )
+            conn.commit()
+        await send_and_remember(
+            update,
+            context,
+            f"✅ Роль пользователя {full_name} (ID: {user_id}) изменена на {new_role_value}.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+        # Clear cached role
+        if "cached_role" in context.user_data and context.user_data["cached_role_user_id"] == user_id:
+            context.user_data.pop("cached_role")
+            context.user_data.pop("cached_role_user_id")
+    except psycopg2.Error as e:
+        logger.error(f"Database error setting role for user {user_id}: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка базы данных при изменении роли.",
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+        )
+    finally:
+        context.user_data.pop("promote_user_id", None)
+        context.user_data.pop("promote_user_name", None)
+        context.user_data.pop("awaiting_role_selection", None)
+        release_db_connection(conn)
 
 def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, user_type: str = None) -> InlineKeyboardMarkup:
     """Generate the main menu keyboard based on user role and user_type."""
@@ -510,7 +697,7 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             user_type = None
         finally:
             if conn:
-                conn.close()
+                release_db_connection(conn)
 
     # New/unregistered users (no role or user_type)
     if role is None or (role == SUPPORT_ROLES["user"] and user_type is None):
@@ -579,7 +766,7 @@ async def get_user_type(user_id: int) -> str:
         logger.error(f"Database error in get_user_type for {user_id}: {e}")
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
     return user_type
 
 def save_resident_to_db(user_id: int, data: dict):
@@ -616,7 +803,7 @@ def save_resident_to_db(user_id: int, data: dict):
             conn.rollback()
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет пользователю главное меню в зависимости от его роли."""
@@ -742,7 +929,7 @@ async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
     await send_and_remember(
         update,
@@ -803,7 +990,7 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     finally:
-        conn.close()
+        release_db_connection(conn)
 
     role = await get_user_role(chat_id)
     if role == SUPPORT_ROLES["admin"]:
@@ -862,7 +1049,7 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             conn.rollback()
         finally:
-            conn.close()
+            release_db_connection(conn)
                 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
@@ -976,7 +1163,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         if conn:
             logger.info("Closing database connection")
-            conn.close()
+            release_db_connection(conn)
 
 async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process problem description and ensure user_type is updated to resident."""
@@ -1037,7 +1224,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             f"✅ Заявка принята!\n\n"
             f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
             f"Номер заявки: #{issue_id}",
-            main_menu_keyboard(update.effective_user.id, SUPPORT_ROLES["resident"], user_type=USER_TYPES["resident"])
+            main_menu_keyboard(update.effective_user.id, SUPPORT_ROLES["user"], user_type=USER_TYPES["resident"])
         )
         # Update user_type in database
         conn = None
@@ -1058,7 +1245,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             logger.error(f"Database error updating user_type for {update.effective_user.id}: {e}", exc_info=True)
         finally:
             if conn:
-                conn.close()
+                release_db_connection(conn)
         context.user_data.clear()
         context.user_data["user_type"] = USER_TYPES["resident"]
         logger.info(f"Cleared user_data and set user_type to resident for user {update.effective_user.id}")
@@ -1217,7 +1404,7 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     finally:
         if conn:
             logger.info("Closing database connection")
-            conn.close()
+            release_db_connection(conn)
 
 from datetime import datetime, timezone, timedelta  # Add this import
 
@@ -1252,7 +1439,6 @@ async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         logger.error(f"Error sending urgent alert for issue #{issue_id}: {e}", exc_info=True)
 
 async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process user full name."""
     if not context.user_data.get("awaiting_name") or not context.user_data.get("registration_flow"):
         logger.warning(f"User {update.effective_user.id} sent name outside registration flow")
         await send_and_remember(
@@ -1263,12 +1449,12 @@ async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     user_name = update.message.text.strip()
-    if not user_name:
-        logger.warning(f"User {update.effective_user.id} sent empty name")
+    if not user_name or not re.match(r'^[А-Яа-яA-Za-z\s-]+$', user_name):
+        logger.warning(f"User {update.effective_user.id} sent invalid name: {user_name}")
         await send_and_remember(
             update,
             context,
-            "❌ ФИО не может быть пустым. Пожалуйста, введите ваше ФИО:",
+            "❌ ФИО должно содержать только буквы, пробелы или дефисы. Пожалуйста, введите ваше ФИО:",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
         )
         return
@@ -1405,7 +1591,7 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 # support_bot.py
 
@@ -1481,7 +1667,7 @@ async def show_request_detail(
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def complete_request(
     update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int
@@ -1588,7 +1774,7 @@ async def save_solution(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("awaiting_solution", None)
         context.user_data.pop("current_issue_id", None)
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show urgent requests for agents with individual detail buttons."""
@@ -1651,7 +1837,7 @@ async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show completed requests."""
@@ -1716,9 +1902,71 @@ async def completed_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
-            
+async def send_overdue_notifications(context: ContextTypes.DEFAULT_TYPE):
+    """Send notifications to agents and director about overdue urgent issues."""
+    logger.info("Checking for overdue urgent issues...")
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.issue_id, r.full_name, r.address, r.phone, i.description, i.created_at
+                FROM issues i
+                JOIN residents r ON i.resident_id = r.resident_id
+                WHERE i.status = 'new' AND i.category = 'urgent'
+                AND i.created_at < %s
+                """,
+                (datetime.now(timezone.utc) - timedelta(hours=24),)
+            )
+            overdue_issues = cur.fetchall()
+
+        if not overdue_issues:
+            logger.info("No overdue urgent issues found")
+            return
+
+        # Get all agents and director
+        agents = []
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id FROM users WHERE role IN (%s, %s)", 
+                           (SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]))
+                agents = [row[0] for row in cur.fetchall()]
+        except psycopg2.Error as e:
+            logger.error(f"Error fetching agents for notifications: {e}")
+            return
+
+        recipients = agents + ([int(DIRECTOR_CHAT_ID)] if DIRECTOR_CHAT_ID else [])
+        for issue in overdue_issues:
+            issue_id, full_name, address, phone, description, created_at = issue
+            message = (
+                f"🚨 Напоминание: Срочная заявка #{issue_id} не обработана!\n\n"
+                f"👤 От: {full_name}\n"
+                f"🏠 Адрес: {address}\n"
+                f"📱 Телефон: {phone}\n"
+                f"📝 Проблема: {description[:100]}{'...' if len(description) > 100 else ''}\n"
+                f"📅 Создана: {created_at.strftime('%d.%m.%Y %H:%M')}"
+            )
+            for recipient_id in recipients:
+                try:
+                    await context.bot.send_message(
+                        chat_id=recipient_id,
+                        text=message,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔍 Подробности", callback_data=f"request_detail_{issue_id}")]
+                        ])
+                    )
+                    logger.info(f"Sent overdue notification for issue #{issue_id} to {recipient_id}")
+                    await asyncio.sleep(0.1)  # Avoid rate limits
+                except telegram.error.BadRequest as e:
+                    logger.warning(f"Failed to send notification to {recipient_id}: {e}")
+    except psycopg2.Error as e:
+        logger.error(f"Database error in send_overdue_notifications: {e}")
+    finally:
+        if conn:
+            release_db_connection(conn)            
 
 import os
 import re
@@ -1738,12 +1986,12 @@ def generate_pdf_report(start_date, end_date):
         # Подключение шрифта
         font_path = "DejaVuSans.ttf"
         if not os.path.exists(font_path):
-            logger.error(f"Font file {font_path} not found.")
-            raise Exception(f"Font file {font_path} not found.")
-
-        pdf.add_font("DejaVuSans", "", font_path, uni=True)
-        pdf.add_font("DejaVuSans", "B", font_path, uni=True)
-        pdf.set_font("DejaVuSans", "", 10)
+            logger.error(f"Font file {font_path} not found, using default font")
+            pdf.set_font("Arial", "", 10)  # Fallback to a built-in font
+        else:
+            pdf.add_font("DejaVuSans", "", font_path, uni=True)
+            pdf.add_font("DejaVuSans", "B", font_path, uni=True)
+            pdf.set_font("DejaVuSans", "", 10)
 
         # Подключение к базе
         conn = get_db_connection()
@@ -1851,7 +2099,7 @@ def generate_pdf_report(start_date, end_date):
         raise
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
             
 async def generate_and_send_report(
     update: Update, context: ContextTypes.DEFAULT_TYPE, start_date: datetime, end_date: datetime
@@ -1943,7 +2191,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     await query.answer()
     user_id = update.effective_user.id
-    role = await get_user_role(user_id)
+    role = await get_user_role(user_id, context)  # Pass context for caching
     user_type = context.user_data.get("user_type", "unknown")
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
@@ -2021,8 +2269,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "help":
             logger.info(f"User {user_id} pressed 'help' button")
             await show_help(update, context)
-        
-        # --- БЛОК ОБРАБОТКИ СПИСКА АКТИВНЫХ ЗАЯВОК И НАВИГАЦИИ ---
         elif query.data == "active_requests":
             context.user_data['active_requests_page'] = 0
             await show_active_requests(update, context)
@@ -2035,8 +2281,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             page = context.user_data.get('active_requests_page', 0)
             context.user_data['active_requests_page'] = page + 1
             await show_active_requests(update, context)
-        # --- КОНЕЦ БЛОКА ---
-
         elif query.data == "urgent_requests":
             await show_urgent_requests(update, context)
         elif query.data == "completed_requests":
@@ -2056,6 +2300,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         elif query.data == "manage_agents":
             await manage_agents_menu(update, context)
+        elif query.data == "promote_demote_user":
+            await promote_demote_user(update, context)
+        elif query.data == "set_role_agent":
+            await set_user_role(update, context, "set_role_agent")
+        elif query.data == "set_role_admin":
+            await set_user_role(update, context, "set_role_admin")
+        elif query.data == "set_role_user":
+            await set_user_role(update, context, "set_role_user")
         elif query.data == "shutdown_bot":
             await shutdown_bot(update, context)
         elif query.data == "confirm_shutdown":
@@ -2082,7 +2334,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "add_agent":
             await add_agent(update, context)
         elif query.data.startswith("confirm_delete_"):
-            resident_chat_id = int(query.data.split("_")[2])
+            resident_chat_id = await validate_chat_id(query.data.split("_")[2], update, context)
             if "resident_to_delete" in context.user_data and context.user_data["resident_to_delete"]["chat_id"] == resident_chat_id:
                 full_name = context.user_data["resident_to_delete"]["full_name"]
                 resident_id = context.user_data["resident_to_delete"]["resident_id"]
@@ -2118,7 +2370,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 finally:
                     context.user_data.clear()
                     if conn:
-                        conn.close()
+                        release_db_connection(conn)
             else:
                 await send_and_remember(
                     update,
@@ -2131,7 +2383,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             saved_role = role
             context.user_data.clear()
             context.user_data["user_type"] = saved_user_type
-            
             if saved_role == SUPPORT_ROLES["admin"]:
                 welcome_text = "👑 Административное меню:"
             elif saved_role == SUPPORT_ROLES["agent"]:
@@ -2139,8 +2390,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             elif saved_role == SUPPORT_ROLES["resident"]:
                 welcome_text = "🏠 Главное меню:"
             else:
-                welcome_text = "🏠Главное меню:" 
-            
+                welcome_text = "🏠 Главное меню:"
             await send_and_remember(
                 update,
                 context,
@@ -2148,9 +2398,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 main_menu_keyboard(user_id, saved_role, is_in_main_menu=True, user_type=saved_user_type)
             )
         elif query.data == "back_to_main":
-            current_role = await get_user_role(user_id)
+            current_role = await get_user_role(user_id, context)
             current_user_type = context.user_data.get("user_type", "unknown")
-            
             if current_role == SUPPORT_ROLES["admin"]:
                 welcome_text = "👑 Административное меню:"
             elif current_role == SUPPORT_ROLES["agent"]:
@@ -2159,7 +2408,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 welcome_text = "🏠 Главное меню:"
             else:
                 welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
-            
             await send_and_remember(
                 update,
                 context,
@@ -2247,7 +2495,7 @@ async def show_agent_info(
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def delete_agent(
     update: Update, context: ContextTypes.DEFAULT_TYPE, agent_id: int
@@ -2272,7 +2520,7 @@ async def delete_agent(
         await update.callback_query.answer("❌ Ошибка при удалении агента", show_alert=True)
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def add_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiate adding a new agent."""
@@ -2326,16 +2574,19 @@ async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT user_id, full_name FROM users WHERE role = %s", (SUPPORT_ROLES["agent"],))
+            cur.execute("SELECT user_id, full_name FROM users WHERE role IN (%s, %s)", 
+                       (SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]))
             agents = cur.fetchall()
 
         if not agents:
             await send_and_remember(
                 update,
                 context,
-                "👥 Нет зарегистрированных агентов.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("➕ Добавить агента", callback_data="add_agent")],
-                                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]),
+                "👥 Нет зарегистрированных агентов или админов.",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить агента", callback_data="add_agent")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                ])
             )
             return
 
@@ -2344,13 +2595,14 @@ async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
             for agent in agents
         ]
         keyboard.append([InlineKeyboardButton("➕ Добавить агента", callback_data="add_agent")])
+        keyboard.append([InlineKeyboardButton("🔄 Изменить роль", callback_data="promote_demote_user")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
 
         await send_and_remember(
             update,
             context,
             "👥 Управление персоналом:",
-            InlineKeyboardMarkup(keyboard),
+            InlineKeyboardMarkup(keyboard)
         )
     except psycopg2.Error as e:
         logger.error(f"Error retrieving agents: {e}")
@@ -2358,11 +2610,11 @@ async def manage_agents_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
             update,
             context,
             "❌ Ошибка при получении данных.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
 async def show_complex_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show information about the residential complex."""
@@ -2461,7 +2713,7 @@ async def process_sales_question(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Database error getting agents: {e}", exc_info=True)
     finally:
         if conn:
-            conn.close()
+            release_db_connection(conn)
 
     # Include director if defined
     recipients = agents + ([int(DIRECTOR_CHAT_ID)] if DIRECTOR_CHAT_ID else [])
@@ -2589,7 +2841,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
     logger.info(f"Received chat_id input for deletion: '{chat_id_input}' from user {update.effective_user.id}")
 
     try:
-        resident_chat_id = int(chat_id_input)  # Define resident_chat_id here
+        resident_chat_id = await validate_chat_id(chat_id_input, update, context)  # Define resident_chat_id here
     except ValueError:
         logger.error(f"Invalid chat_id format: '{chat_id_input}'")
         await send_and_remember(
@@ -2659,7 +2911,7 @@ async def process_resident_delete(update: Update, context: ContextTypes.DEFAULT_
     finally:
         context.user_data.clear()  # Clear all states after completion
         if conn:
-            conn.close()
+            release_db_connection(conn)
         
 async def add_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt admin to enter chat ID of new resident."""
@@ -2697,7 +2949,7 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         logger.info(f"Sanitized chat ID input: '{sanitized_input}' (length: {len(sanitized_input)})")
         if not sanitized_input:
             raise ValueError("No valid digits found in input")
-        chat_id = int(sanitized_input)
+        chat_id = await validate_chat_id(sanitized_input, update, context)
         if chat_id <= 0:
             raise ValueError("Chat ID must be a positive number")
         context.user_data["new_resident_chat_id"] = chat_id
@@ -2716,7 +2968,7 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
                     )
                     return
         finally:
-            conn.close()
+            release_db_connection(conn)
 
         # Transition to awaiting full name
         await send_and_remember(
@@ -2745,7 +2997,7 @@ async def process_resident_id_add(update: Update, context: ContextTypes.DEFAULT_
         )
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            release_db_connection(conn)
             
 async def process_new_resident_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process full name for new resident and prompt for address."""
@@ -2859,7 +3111,7 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
                     user_type = EXCLUDED.user_type,
                     registration_date = EXCLUDED.registration_date
                 """,
-                (chat_id, username, full_name, SUPPORT_ROLES["resident"], USER_TYPES["resident"], datetime.now()),
+                (chat_id, username, full_name, SUPPORT_ROLES["user"], USER_TYPES["resident"], datetime.now()),
             )
             conn.commit()
 
@@ -2900,70 +3152,27 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
         context.user_data.pop("new_resident_chat_id", None)
         context.user_data.pop("new_resident_name", None)
         context.user_data.pop("new_resident_address", None)
-        conn.close()
+        release_db_connection(conn)
 
 # ... (previous code, including process_new_resident_phone)
 
 # Эти функции нужно вставить ПЕРЕД save_user_data
-
-async def handle_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saves user's name and asks for address."""
-    context.user_data['name'] = update.message.text
-    context.user_data['state'] = 'awaiting_address'
-    await update.message.reply_text("Отлично! Теперь введите ваш адрес (например, Улица Абая 1, кв 1):")
-
-async def handle_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saves user's address and asks for phone."""
-    context.user_data['address'] = update.message.text
-    context.user_data['state'] = 'awaiting_phone'
-    await update.message.reply_text("Принято. Теперь введите ваш номер телефона (например, +7 777 123 4567):")
-
-async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saves phone, completes registration, and shows the main menu."""
-    user_id = update.effective_user.id
-    context.user_data['phone'] = update.message.text
-    
-    # Сохраняем все данные в базу данных
-    save_resident_to_db(user_id, context.user_data)
-    
-    await update.message.reply_text("✅ Спасибо! Ваша регистрация в качестве резидента успешно завершена.")
-    
-    # Очищаем состояние регистрации
-    for key in ['state', 'name', 'address', 'phone']:
-        if key in context.user_data:
-            del context.user_data[key]
-            
-    # Вызываем главное меню для нового резидента
-    await main_menu(update, context)
-
-# Update save_user_data to route to handle_name_input
-# Это твоя обновленная функция save_user_data
-
-# support_bot.py
-
 async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Routes user input based on the current state by checking boolean flags."""
     user_id = update.effective_user.id
     logger.info(f"User {user_id} context keys: {list(context.user_data.keys())}")
     logger.info(f"User {user_id} sent text: {update.message.text}")
 
-    # --- РЕГИСТРАЦИЯ РЕЗИДЕНТА (инициированная пользователем) ---
     if context.user_data.get("awaiting_name"):
         await process_user_name(update, context)
     elif context.user_data.get("awaiting_address"):
         await process_user_address(update, context)
     elif context.user_data.get("awaiting_phone"):
         await process_user_phone(update, context)
-
-    # --- ПОДАЧА ЗАЯВКИ ---
     elif context.user_data.get("awaiting_problem"):
         await process_problem_report(update, context)
-
-    # --- ЗАВЕРШЕНИЕ ЗАЯВКИ (Агент/Админ) ---
     elif context.user_data.get("awaiting_solution"):
         await save_solution(update, context)
-
-    # --- ДОБАВЛЕНИЕ РЕЗИДЕНТА (Админ) ---
     elif context.user_data.get("awaiting_resident_id_add"):
         await process_resident_id_add(update, context)
     elif context.user_data.get("awaiting_new_resident_name"):
@@ -2972,27 +3181,20 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_new_resident_address(update, context)
     elif context.user_data.get("awaiting_new_resident_phone"):
         await process_new_resident_phone(update, context)
-        
-    # --- УДАЛЕНИЕ РЕЗИДЕНТА (Админ) ---
     elif context.user_data.get("awaiting_resident_id_delete"):
         await process_resident_delete(update, context)
-
-    # --- УПРАВЛЕНИЕ СОТРУДНИКАМИ (Админ) ---
     elif context.user_data.get("awaiting_agent_id"):
         await process_new_agent(update, context)
     elif context.user_data.get("awaiting_agent_name"):
         await save_agent(update, context)
-
-    # --- ОТДЕЛ ПРОДАЖ ---
     elif context.user_data.get("awaiting_sales_question"):
         await process_sales_question(update, context)
     elif context.user_data.get("reply_to_user"):
         await process_reply(update, context)
-        
-    # --- СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ---
     elif context.user_data.get("awaiting_user_message"):
         await send_user_message(update, context)
-        
+    elif context.user_data.get("awaiting_promote_user_id"):
+        await process_promote_user_id(update, context)
     else:
         logger.warning(f"No awaiting state found for user {user_id} or state is None. Defaulting to main menu.")
         await main_menu(update, context)
@@ -3056,7 +3258,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_check():
     global health_server
     port = int(os.getenv("PORT", 8080))
-    health_server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    health_server = HTTPServer(('127.0.0.1', port), HealthCheckHandler)
     logger.info(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
     health_server.serve_forever()
 
@@ -3104,11 +3306,12 @@ async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_
 # Update the main() function (near the end of the file) as follows:
 def main() -> None:
     """Run the bot with auto-restart."""
-    init_db()
+    init_db()  # This now initializes the pool and tables
+    health_server_thread = None
 
     while True:
         try:
-            health_server = start_health_server()
+            health_server_thread = start_health_server()
             logger.info("🔄 Initializing bot...")
             application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -3120,6 +3323,13 @@ def main() -> None:
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data, block=False))
             application.add_error_handler(error_handler)
 
+            # Schedule overdue notifications every 6 hours
+            application.job_queue.run_repeating(
+                send_overdue_notifications,
+                interval=6*60*60,  # 6 hours in seconds
+                first=60  # Start after 1 minute
+            )
+
             logger.info("🚀 Starting bot polling...")
             application.run_polling(
                 drop_pending_updates=True,
@@ -3128,9 +3338,15 @@ def main() -> None:
             )
         except KeyboardInterrupt:
             logger.info("🛑 Bot stopped by user")
+            stop_health_server()
+            global db_pool
+            if db_pool:
+                db_pool.closeall()
+                logger.info("Database connection pool closed")
             break
         except Exception as e:
             logger.error(f"⚠️ Bot crashed: {str(e)[:200]}")
+            stop_health_server()
             logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
             
