@@ -818,37 +818,52 @@ async def get_user_type(user_id: int) -> str:
     return user_type
 
 def save_resident_to_db(user_id: int, data: dict):
-    """Сохраняет нового резидента в таблицы users и residents."""
+    """Save a new resident to the users and residents tables."""
+    required_fields = ["name", "address", "phone"]
+    missing_fields = [field for field in required_fields if field not in data or not data[field]]
+    if missing_fields:
+        logger.error(f"Missing required fields for user {user_id}: {missing_fields}")
+        raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
+    
+    # Validate field formats
+    if not re.match(r'^[А-Яа-яA-Za-z\s-]+$', data['name']):
+        raise ValueError("Invalid name format: only letters, spaces, and hyphens allowed")
+    if len(data['address']) > 255:
+        raise ValueError("Address is too long (max 255 characters)")
+    if not re.match(r"^\+?\d{10,15}$", re.sub(r"[^\d+]", "", data['phone'])):
+        raise ValueError("Invalid phone format: must be +1234567890 format")
+    
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Сначала добавляем или обновляем запись в таблице users
-            # Устанавливаем роль 'resident' и тип 'resident'
+            # Insert or update user in users table
             cur.execute(
                 """
-                INSERT INTO users (user_id, role, user_type) VALUES (%s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, user_type = EXCLUDED.user_type;
-                """,
-                (user_id, SUPPORT_ROLES["resident"], 'resident')
-            )
-            
-            # Затем добавляем детальную информацию в таблицу residents
-            cur.execute(
-                """
-                INSERT INTO residents (user_id, full_name, address, phone_number) 
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO users (user_id, full_name, role, user_type, registration_date)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE 
-                SET full_name = EXCLUDED.full_name, address = EXCLUDED.address, phone_number = EXCLUDED.phone_number;
+                SET full_name = EXCLUDED.full_name, role = EXCLUDED.role, user_type = EXCLUDED.user_type
                 """,
-                (user_id, data['name'], data['address'], data['phone'])
+                (user_id, data['name'], SUPPORT_ROLES["resident"], USER_TYPES["resident"], datetime.now(timezone.utc))
+            )
+            # Insert or update resident in residents table
+            cur.execute(
+                """
+                INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE 
+                SET full_name = EXCLUDED.full_name, address = EXCLUDED.address, phone = EXCLUDED.phone
+                """,
+                (user_id, data['name'], data['address'], data['phone'], datetime.now(timezone.utc))
             )
         conn.commit()
         logger.info(f"Successfully saved resident data for user {user_id}")
     except psycopg2.Error as e:
-        logger.error(f"Database error in save_resident_to_db for {user_id}: {e}")
+        logger.error(f"Database error saving resident data for user {user_id}: {e}")
         if conn:
             conn.rollback()
+        raise
     finally:
         if conn:
             release_db_connection(conn)
