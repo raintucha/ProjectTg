@@ -44,20 +44,16 @@ async def validate_chat_id(chat_id_input: str, update: Update = None, context: C
             )
         raise ValueError("Неправильный chat_id")
 
-def validate_director_chat_id(director_chat_id: str) -> int:
-    """Проверяет DIRECTOR_CHAT_ID при запуске бота.
-    
-    Args:
-        director_chat_id: Значение DIRECTOR_CHAT_ID из переменной окружения.
-    
-    Returns:
-        int: Правильный chat_id.
-    
-    Raises:
-        ValueError: Если DIRECTOR_CHAT_ID некорректен.
-    """
+import re
+
+def validate_director_chat_id(chat_id_input: str) -> int:
+    if not chat_id_input:
+        raise ValueError("DIRECTOR_CHAT_ID environment variable is missing")
     try:
-        return validate_chat_id(director_chat_id)
-    except ValueError:
-        logger.error(f"Некорректный DIRECTOR_CHAT_ID: '{director_chat_id}'")
-        raise ValueError("DIRECTOR_CHAT_ID должен быть числом")
+        cleaned_input = re.sub(r'[^\d-]', '', chat_id_input)
+        chat_id = int(cleaned_input)
+        if chat_id == 0 or abs(chat_id) > 2**63-1:
+            raise ValueError("Chat ID outside valid range")
+        return chat_id
+    except ValueError as e:
+        raise ValueError(f"Invalid DIRECTOR_CHAT_ID format: {str(e)}")
