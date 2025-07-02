@@ -2734,7 +2734,7 @@ async def process_sales_question(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     username = update.effective_user.username or "No username"
     full_name = update.effective_user.full_name or "Unknown"
-    timestamp = datetime.now().strftime("%H:%M %d.%m.%Y")  # Format: 07:54 30.06.2025
+    timestamp = datetime.now(APP_TIMEZONE).strftime("%H:%M %d.%m.%Y")  # Format: 07:54 30.06.2025
 
     # Query all agents (role = 2)
     conn = None
