@@ -41,17 +41,40 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 db_pool = None
 
 def init_db_pool():
-    """Initialize the database connection pool."""
+    """Initialize the database connection pool with retries."""
     global db_pool
+    retries = int(os.getenv("DB_RETRIES", 3))
+    delay = int(os.getenv("DB_RETRY_DELAY", 5))
+    minconn = int(os.getenv("DB_MINCONN", 2))
+    maxconn = int(os.getenv("DB_MAXCONN", 20))
+
+    for attempt in range(retries):
+        try:
+            db_pool = psycopg2.pool.SimpleConnectionPool(
+                minconn=minconn,
+                maxconn=maxconn,
+                dsn=DATABASE_URL
+            )
+            logger.info("Database connection pool initialized")
+            return
+        except psycopg2.Error as e:
+            logger.error(f"Failed to initialize database connection pool (attempt {attempt + 1}/{retries}): {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    raise Exception("Failed to initialize database connection pool after all retries")
+
+def get_db_connection():
+    """Get a connection from the pool, reinitializing if necessary."""
+    global db_pool
+    if db_pool is None or db_pool.closed:
+        logger.warning("Database connection pool is None or closed, reinitializing")
+        init_db_pool()
     try:
-        db_pool = psycopg2.pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=10,
-            dsn=DATABASE_URL
-        )
-        logger.info("Database connection pool initialized")
+        conn = db_pool.getconn()
+        logger.info("Retrieved connection from pool")
+        return conn
     except psycopg2.Error as e:
-        logger.error(f"Failed to initialize database connection pool: {e}")
+        logger.error(f"Database connection error: {e}")
         raise
 
 # Validate environment variables
@@ -110,8 +133,8 @@ def init_db():
                     created_at TIMESTAMP NOT NULL,
                     completed_at TIMESTAMP,
                     closed_by BIGINT,
-                    FOREIGN KEY (resident_id) REFERENCES residents(resident_id),
-                    FOREIGN KEY (closed_by) REFERENCES users(user_id)
+                    FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+                    FOREIGN KEY (closed_by) REFERENCES users(user_id) ON DELETE SET NULL
                 )
             """)
             cur.execute("""
@@ -122,11 +145,10 @@ def init_db():
                     user_id BIGINT NOT NULL,
                     details TEXT,
                     action_time TIMESTAMP NOT NULL,
-                    FOREIGN KEY (issue_id) REFERENCES issues(issue_id),
-                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    FOREIGN KEY (issue_id) REFERENCES issues(issue_id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL
                 )
             """)
-            # Добавляем индексы для оптимизации
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_residents_chat_id ON residents(chat_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status)")
@@ -451,7 +473,7 @@ async def process_report_period(
     await generate_and_send_report(update, context, start_date, end_date)
 
 async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process user phone number."""
+    """Process user phone number and complete registration."""
     if not context.user_data.get("registration_flow") or not context.user_data.get("awaiting_phone"):
         logger.warning(f"User {update.effective_user.id} sent phone number outside registration flow")
         await send_and_remember(
@@ -463,9 +485,8 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     phone = update.message.text.strip()
-    # Stricter phone validation
     cleaned_phone = re.sub(r"[^\d+]", "", phone)
-    if not re.match(r"^\+?\d{10,15}$", cleaned_phone):
+    if not re.match(r"^\+\d{10,15}$", cleaned_phone):
         await send_and_remember(
             update,
             context,
@@ -474,17 +495,44 @@ async def process_user_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     
-    context.user_data["user_phone"] = cleaned_phone
-    context.user_data["registration_flow"] = True
-    context.user_data.pop("awaiting_phone", None)
-    context.user_data["awaiting_problem"] = True
-    logger.info(f"Stored user_phone: {cleaned_phone} for chat_id: {update.effective_user.id}")
-    await send_and_remember(
-        update,
-        context,
-        "✍️ Опишите вашу проблему:",
-        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
-    )
+    user_id = update.effective_user.id
+    user_type = context.user_data.get("user_type", USER_TYPES["resident"])
+    full_name = context.user_data.get("user_name", update.effective_user.full_name or "Unknown")
+    address = context.user_data.get("user_address", "Не указан")
+    
+    # Save resident data
+    data = {"name": full_name, "address": address, "phone": cleaned_phone}
+    try:
+        save_resident_to_db(user_id, data)
+        logger.info(f"User {user_id} successfully registered as resident")
+        
+        # Clear registration state
+        context.user_data.clear()
+        context.user_data["user_type"] = user_type  # Preserve user_type for menu
+        
+        # Send confirmation and show main menu
+        await send_and_remember(
+            update,
+            context,
+            "✅ Вы успешно зарегистрированы как резидент ЖК Сункар!",
+            main_menu_keyboard(user_id, await get_user_role(user_id), user_type=user_type),
+        )
+    except psycopg2.Error as e:
+        logger.error(f"Database error registering user {user_id}: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Ошибка при регистрации. Попробуйте позже.",
+            main_menu_keyboard(user_id, await get_user_role(user_id)),
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error registering user {user_id}: {e}")
+        await send_and_remember(
+            update,
+            context,
+            "❌ Произошла ошибка. Пожалуйста, свяжитесь с администратором.",
+            main_menu_keyboard(user_id, await get_user_role(user_id)),
+        )
             
 async def save_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save new agent to database."""
@@ -782,7 +830,7 @@ def save_resident_to_db(user_id: int, data: dict):
                 INSERT INTO users (user_id, role, user_type) VALUES (%s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, user_type = EXCLUDED.user_type;
                 """,
-                (user_id, 'resident', 'resident')
+                (user_id, SUPPORT_ROLES["resident"], 'resident')
             )
             
             # Затем добавляем детальную информацию в таблицу residents
@@ -883,53 +931,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def register_as_resident(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle resident registration and ensure user_type and role are updated."""
     user_id = update.effective_user.id
     logger.info(f"User {user_id} initiated resident registration")
 
     # Clear previous state to avoid conflicts
     context.user_data.clear()
-
-    # Set user_type to resident in context
     context.user_data["user_type"] = USER_TYPES["resident"]
     context.user_data["registration_flow"] = True
     context.user_data["awaiting_name"] = True
-
-    # Update role and user_type in database
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE 
-                SET role = EXCLUDED.role, user_type = EXCLUDED.user_type, username = EXCLUDED.username, full_name = EXCLUDED.full_name
-                """,
-                (
-                    user_id,
-                    update.effective_user.username,
-                    update.effective_user.full_name or "Unknown",
-                    SUPPORT_ROLES["user"],  # Changed from SUPPORT_ROLES["resident"] to SUPPORT_ROLES["user"]
-                    USER_TYPES["resident"],
-                    datetime.now(timezone.utc)
-                )
-            )
-            conn.commit()
-            logger.info(f"Set user {user_id} as resident with user_type 'resident' in database")
-    except psycopg2.Error as e:
-        logger.error(f"Database error updating user {user_id}: {e}", exc_info=True)
-        await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка базы данных. Попробуйте позже.",
-            main_menu_keyboard(user_id, await get_user_role(user_id), user_type=USER_TYPES["resident"])
-        )
-        return
-    finally:
-        if conn:
-            release_db_connection(conn)
 
     await send_and_remember(
         update,
@@ -1408,16 +1417,19 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 from datetime import datetime, timezone, timedelta  # Add this import
 
+APP_TIMEZONE = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", 5))))
+
 async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int):
-    """Send urgent alert to director."""
+    if not context.bot:
+        logger.error("Bot instance not initialized")
+        return
     try:
         user = update.effective_user
         full_name = context.user_data.get("user_name", user.full_name or "Unknown")
         phone = context.user_data.get("user_phone", "Не указан")
         address = context.user_data.get("user_address", "Не указан")
         problem_text = context.user_data.get("problem_text", "Не указана")
-        timestamp = datetime.now(timezone(timedelta(hours=5))).strftime("%H:%M %d.%m.%Y")  # UTC+5
-
+        timestamp = datetime.now(timezone(timedelta(hours=5))).strftime("%H:%M %d.%m.%Y")
         message = (
             f"🚨 СРОЧНОЕ ОБРАЩЕНИЕ #{issue_id} 🚨\n\n"
             f"От: {full_name} (@{user.username or 'нет'})\n"
@@ -1427,14 +1439,11 @@ async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             f"Проблема: {problem_text}\n"
             f"Время: {timestamp}"
         )
-
-        # Notify director
         await context.bot.send_message(
             chat_id=DIRECTOR_CHAT_ID,
             text=message,
         )
         logger.info(f"Sent urgent alert to director for issue #{issue_id}")
-
     except Exception as e:
         logger.error(f"Error sending urgent alert for issue #{issue_id}: {e}", exc_info=True)
 
@@ -1458,6 +1467,16 @@ async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
         )
         return
+    if len(user_name) > 100:  # Ограничение длины
+        logger.warning(f"User {update.effective_user.id} sent name too long: {len(user_name)} characters")
+        await send_and_remember(
+            update,
+            context,
+            "❌ ФИО слишком длинное (максимум 100 символов). Пожалуйста, введите корректное ФИО:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]),
+        )
+        return
+    # ... (остальной код)
     context.user_data["user_name"] = user_name
     context.user_data["registration_flow"] = True
     context.user_data.pop("awaiting_name", None)
@@ -1536,21 +1555,21 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        # --- Логика пагинации (постраничного вывода) ---
-        page = context.user_data.get("active_requests_page", 0)
-        items_per_page = 5  # 5 заявок на одной странице
+        # Pagination
+        page = context.user_data.get(f"active_requests_page_{user_id}", 0)  # Per-user pagination
+        items_per_page = 5
         start_index = page * items_per_page
         end_index = start_index + items_per_page
         
         paginated_requests = all_requests[start_index:end_index]
         total_pages = (len(all_requests) + items_per_page - 1) // items_per_page
+        total_requests = len(all_requests)
 
         if not paginated_requests:
             await send_and_remember(update, context, "📭 Больше заявок нет.")
             return
 
-        # --- Формирование одного сообщения со списком ---
-        text = f"🔔 Активные заявки (Страница {page + 1}/{total_pages}):\n\n"
+        text = f"🔔 Активные заявки (Страница {page + 1}/{total_pages}, Всего: {total_requests}):\n\n"
         keyboard = []
         for req in paginated_requests:
             issue_id, full_name, description, created_at, category = req
@@ -1559,15 +1578,14 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"📝 {description[:40]}{'...' if len(description) > 40 else ''}\n"
                 f"{'🚨 Срочная' if category == 'urgent' else '📋 Обычная'}\n\n"
             )
-            # Добавляем кнопку для просмотра деталей этой заявки
             keyboard.append([InlineKeyboardButton(f"🔍 Смотреть заявку #{issue_id}", callback_data=f"request_detail_{issue_id}")])
 
-        # --- Кнопки навигации ---
         nav_buttons = []
         if page > 0:
             nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data="req_prev"))
         if end_index < len(all_requests):
             nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data="req_next"))
+        nav_buttons.append(InlineKeyboardButton("🔄 Обновить", callback_data="req_refresh"))
         
         if nav_buttons:
             keyboard.append(nav_buttons)
@@ -2331,6 +2349,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data.startswith("delete_agent_"):
             user_id = int(query.data.split("_")[2])
             await delete_agent(update, context, user_id)
+        elif query.data == "req_refresh":
+            await show_active_requests(update, context)
         elif query.data == "add_agent":
             await add_agent(update, context)
         elif query.data.startswith("confirm_delete_"):
@@ -2387,7 +2407,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 welcome_text = "👑 Административное меню:"
             elif saved_role == SUPPORT_ROLES["agent"]:
                 welcome_text = "👷 Панель сотрудника:"
-            elif saved_role == SUPPORT_ROLES["resident"]:
+            elif saved_role == SUPPORT_ROLES["user"] and saved_user_type == USER_TYPES["resident"]:  # Исправлено
                 welcome_text = "🏠 Главное меню:"
             else:
                 welcome_text = "🏠 Главное меню:"
@@ -2404,7 +2424,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 welcome_text = "👑 Административное меню:"
             elif current_role == SUPPORT_ROLES["agent"]:
                 welcome_text = "👷 Панель сотрудника:"
-            elif current_role == SUPPORT_ROLES["resident"]:
+            elif current_role == SUPPORT_ROLES["user"] and current_user_type == USER_TYPES["resident"]:  # Исправлено
                 welcome_text = "🏠 Главное меню:"
             else:
                 welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
@@ -3045,7 +3065,6 @@ async def process_new_resident_address(update: Update, context: ContextTypes.DEF
     context.user_data["awaiting_new_resident_phone"] = True
 
 async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save new resident to database and update user_type with robust notification handling."""
     if "awaiting_new_resident_phone" not in context.user_data:
         await send_and_remember(
             update,
@@ -3055,7 +3074,6 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
         )
         return
 
-    # Validate required data
     required_keys = ["new_resident_chat_id", "new_resident_name", "new_resident_address"]
     missing_keys = [key for key in required_keys if key not in context.user_data]
     if missing_keys:
@@ -3074,70 +3092,41 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
     admin_user_id = update.effective_user.id
     admin_role = await get_user_role(admin_user_id)
 
-    conn = get_db_connection()
+    # Validate phone number
+    cleaned_phone = re.sub(r"[^\d+]", "", phone)
+    if not re.match(r"^\+?\d{10,15}$", cleaned_phone):
+        await send_and_remember(
+            update,
+            context,
+            "❌ Неверный формат телефона. Введите номер в формате +1234567890:",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]]),
+        )
+        return
+
+    # Save resident data
+    data = {"name": full_name, "address": address, "phone": cleaned_phone}
     try:
-        with conn.cursor() as cur:
-            # Check for existing resident
-            cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
-            if cur.fetchone():
-                await send_and_remember(
-                    update,
-                    context,
-                    f"❌ Пользователь с chat ID {chat_id} уже зарегистрирован как резидент.",
-                    main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
-                )
-                return
-
-            # Insert into residents table
-            cur.execute(
-                """
-                INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
-                VALUES (%s, %s, %s, %s, %s) RETURNING resident_id
-                """,
-                (chat_id, full_name, address, phone, datetime.now()),
+        save_resident_to_db(chat_id, data)
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🏠 Вы зарегистрированы как резидент ЖК Сункар! Используйте /start для доступа к меню.",
             )
-            resident_id = cur.fetchone()[0]
-
-            # Insert or update users table for the resident
-            username = update.effective_user.username if update.effective_user.username else None
-            cur.execute(
-                """
-                INSERT INTO users (user_id, username, full_name, role, user_type, registration_date)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE 
-                SET username = EXCLUDED.username, 
-                    full_name = EXCLUDED.full_name, 
-                    role = EXCLUDED.role, 
-                    user_type = EXCLUDED.user_type,
-                    registration_date = EXCLUDED.registration_date
-                """,
-                (chat_id, username, full_name, SUPPORT_ROLES["user"], USER_TYPES["resident"], datetime.now()),
-            )
-            conn.commit()
-
-            # Attempt to notify the new resident
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="🏠 Вы зарегистрированы как резидент ЖК Сункар! Используйте /start для доступа к меню.",
-                )
-                logger.info(f"Successfully notified new resident (chat_id: {chat_id})")
-            except telegram.error.BadRequest as e:
-                logger.warning(f"Failed to notify new resident (chat_id: {chat_id}): {e}")
-                await send_and_remember(
-                    update,
-                    context,
-                    f"⚠️ Не удалось уведомить резидента (chat ID: {chat_id}). Убедитесь, что пользователь запустил бота с /start.",
-                    main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
-                )
-
-            # Send success message to admin
+            logger.info(f"Successfully notified new resident (chat_id: {chat_id})")
+        except telegram.error.BadRequest as e:
+            logger.warning(f"Failed to notify new resident (chat_id: {chat_id}): {e}")
             await send_and_remember(
                 update,
                 context,
-                f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен с ID {resident_id}.",
+                f"⚠️ Не удалось уведомить резидента (chat ID: {chat_id}). Убедитесь, что пользователь запустил бота с /start.",
                 main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
             )
+        await send_and_remember(
+            update,
+            context,
+            f"✅ Резидент {full_name} (chat ID: {chat_id}) добавлен.",
+            main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
+        )
     except psycopg2.Error as e:
         logger.error(f"Database error adding resident (chat_id={chat_id}): {e}")
         await send_and_remember(
@@ -3146,13 +3135,9 @@ async def process_new_resident_phone(update: Update, context: ContextTypes.DEFAU
             "❌ Ошибка базы данных. Попробуйте позже.",
             main_menu_keyboard(admin_user_id, admin_role, user_type=context.user_data.get("user_type")),
         )
-        conn.rollback()
     finally:
-        context.user_data.pop("awaiting_new_resident_phone", None)
-        context.user_data.pop("new_resident_chat_id", None)
-        context.user_data.pop("new_resident_name", None)
-        context.user_data.pop("new_resident_address", None)
-        release_db_connection(conn)
+        context.user_data.clear()  # Clear all states
+        context.user_data["user_type"] = USER_TYPES["resident"]  # Preserve user_type
 
 # ... (previous code, including process_new_resident_phone)
 
@@ -3200,10 +3185,26 @@ async def save_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await main_menu(update, context)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors."""
     error = context.error
     logger.error("Exception occurred:", exc_info=error)
     
+    user_id = update.effective_user.id if update and update.effective_user else "unknown"
+    
+    # Notify director for critical errors
+    if not isinstance(error, (NetworkError, TimedOut)):
+        try:
+            if DIRECTOR_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=DIRECTOR_CHAT_ID,
+                    text=f"⚠️ Критическая ошибка в боте:\n"
+                         f"Пользователь: {user_id}\n"
+                         f"Ошибка: {str(error)[:200]}"
+                )
+                logger.info(f"Notified director about critical error for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to notify director: {e}")
+
+    # Handle specific error types
     if isinstance(error, (NetworkError, TimedOut)):
         logger.warning(f"⚠️ Network error occurred: {error}. Attempting to reconnect...")
         if update and update.effective_user:
@@ -3211,12 +3212,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update,
                 context,
                 "⚠️ Проблема с сетью. Пожалуйста, попробуйте позже.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+                main_menu_keyboard(user_id, await get_user_role(user_id))
             )
         return
     
     if isinstance(error, KeyError) and "resident" in str(error):
-        logger.error(f"KeyError: 'resident' not found in SUPPORT_ROLES, user_id: {update.effective_user.id if update else 'unknown'}")
+        logger.error(f"KeyError: 'resident' not found in SUPPORT_ROLES, user_id: {user_id}")
         if update and update.effective_user:
             await send_and_remember(
                 update,
@@ -3226,12 +3227,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     
+    # Clear user_data only for state-related errors
+    if isinstance(error, (KeyError, ValueError)):
+        if update and update.effective_user:
+            context.user_data.clear()
+            logger.info(f"Cleared user_data for user {user_id} due to state-related error")
+    
     if update and update.effective_user:
         await send_and_remember(
             update,
             context,
             "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в техподдержку.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
+            main_menu_keyboard(user_id, await get_user_role(user_id))
         )
 
 import threading
@@ -3258,7 +3265,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_check():
     global health_server
     port = int(os.getenv("PORT", 8080))
-    health_server = HTTPServer(('127.0.0.1', port), HealthCheckHandler)
+    health_server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     logger.info(f"✅ Health check server running on port {port} (PID: {os.getpid()})")
     health_server.serve_forever()
 
@@ -3272,9 +3279,14 @@ def start_health_server():
 def stop_health_server():
     global health_server
     if health_server:
-        health_server.shutdown()
-        health_server.server_close()
-        logger.info("Health check server stopped")
+        try:
+            health_server.shutdown()
+            health_server.server_close()
+            logger.info("Health check server stopped")
+        except Exception as e:
+            logger.error(f"Error stopping health server: {e}")
+        finally:
+            health_server = None
 
 async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /report command to initiate report generation."""
@@ -3306,7 +3318,24 @@ async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_
 # Update the main() function (near the end of the file) as follows:
 def main() -> None:
     """Run the bot with auto-restart."""
-    init_db()  # This now initializes the pool and tables
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN is not set")
+        raise ValueError("TELEGRAM_TOKEN environment variable is missing")
+    
+    try:
+        # Test token validity
+        import telegram
+        bot = telegram.Bot(token=TELEGRAM_TOKEN)
+        bot.get_me()  # This will raise an error if the token is invalid
+        logger.info("Telegram token validated successfully")
+    except telegram.error.InvalidToken:
+        logger.error("Invalid TELEGRAM_TOKEN")
+        raise ValueError("Invalid TELEGRAM_TOKEN")
+    except Exception as e:
+        logger.error(f"Error validating TELEGRAM_TOKEN: {e}")
+        raise
+
+    init_db()
     health_server_thread = None
 
     while True:
@@ -3326,8 +3355,8 @@ def main() -> None:
             # Schedule overdue notifications every 6 hours
             application.job_queue.run_repeating(
                 send_overdue_notifications,
-                interval=6*60*60,  # 6 hours in seconds
-                first=60  # Start after 1 minute
+                interval=6*60*60,
+                first=60
             )
 
             logger.info("🚀 Starting bot polling...")
