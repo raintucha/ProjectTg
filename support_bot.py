@@ -2067,7 +2067,6 @@ def generate_pdf_report(start_date, end_date):
             pdf.set_font("DejaVuSans", "", 10)
 
         # Добавление страницы и заголовка таблицы
-        pdf.add_page()
         draw_table_header()
 
         for issue in issues:
