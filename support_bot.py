@@ -173,8 +173,8 @@ def release_db_connection(conn):
     try:
         db_pool.putconn(conn)
         logger.info("Released connection back to pool")
-    except psycopg2.Error as e:
-        logger.error(f"Error releasing connection to pool: {e}")
+    except psycopg2.Error as e:000000000
+    logger.error(f"Error releasing connection to pool: {e}")
 
 async def get_user_role(user_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> int:
     if context and "cached_role" in context.user_data and context.user_data["cached_role_user_id"] == user_id:
@@ -2644,8 +2644,8 @@ async def show_sales_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = (
         "👥 Отдел продаж ЖК Сункар:\n\n"
-        "1. Арман @ArmanSales – +7 777 123 4567\n"
-        "2. Второй сотрудник – @AnnaSales – +7 777 987 6543\n\n"
+        "1. Ахметов Арман Мендыбаевич @ArmanSales – +7 777 123 4567\n"
+        "2. Асембаева Меруерт Акылжановна – @AnnaSales – +7 777 987 6543\n\n"
         "📞 Свяжитесь напрямую или задайте вопрос здесь:"
     )
     keyboard = [
