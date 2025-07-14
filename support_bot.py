@@ -1274,7 +1274,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         await send_and_remember(
             update,
             context,
-            f"❌ Ошибка базы данных при сохранении заявки: {e}. Попробуйте позже.",
+            f"❌ Ошибка базы данных при сохранении заявки: {e}. аПопробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["resident"])
         )
     except Exception as e:
@@ -2628,7 +2628,7 @@ async def show_pricing_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 1-комнатные: 300,000 KZT/м²\n"
         "• 2-комнатные: 280,000 KZT/м²\n"
         "• 3-комнатные: 270,000 KZT/м²\n\n"
-        "📞 Для точной стоимости свяжитесь с отделом продаж: @SunqarSales"
+        "📞 Для точной стоимости свяжитесь с отделом продаж: @ArmanSales"
     )
     await send_and_remember(
         update,
@@ -2644,8 +2644,8 @@ async def show_sales_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = (
         "👥 Отдел продаж ЖК Сункар:\n\n"
-        "1. Ахметов Арман Мендыбаевич @ArmanSales – +7 777 123 4567\n"
-        "2. Асембаева Меруерт Акылжановна – @AnnaSales – +7 777 987 6543\n\n"
+        "1. Ахметов Арман Мендыбаевич @ArmanSales – +7 777 755 8808\n"
+        "2. Асембаева Меруерт Акылжановна – @AnnaSales – +7 777 755 8818\n\n"
         "📞 Свяжитесь напрямую или задайте вопрос здесь:"
     )
     keyboard = [
