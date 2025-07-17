@@ -5,3 +5,6 @@ __pycache__/
 .coverage
 venv/
 *.sqlite3
+
+process_resident_id_add.py
+test_support_bot.py
