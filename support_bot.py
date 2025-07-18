@@ -1070,7 +1070,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_and_remember(
             update,
             context,
-            f"ℹ️ Справка:\n\n• Для срочных проблем используйте слова: 'потоп', 'пожар', 'авария'\n"
+            f"ℹ️ Справка:\n\n• Для срочных проблем используйте слов: 'срочно'\n"
             f"• Новости ЖК: {NEWS_CHANNEL}\n• Техподдержка: @ShiroOni99",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
@@ -1202,7 +1202,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
 
     # Store problem and determine urgency
     context.user_data["problem_text"] = problem_text
-    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
+    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
     context.user_data["is_urgent"] = any(keyword in problem_text.lower() for keyword in urgent_keywords)
     context.user_data.pop("awaiting_problem", None)
     logger.info(f"Received problem: {problem_text} for chat_id: {update.effective_user.id}, is_urgent: {context.user_data['is_urgent']}")
@@ -1293,7 +1293,7 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     address = context.user_data.get("user_address", "Админ" if role == SUPPORT_ROLES["admin"] else None)
     phone = context.user_data.get("user_phone", None)
     problem_text = context.user_data.get("problem_text", problem_text)
-    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно"]
+    urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
     is_urgent = context.user_data.get("is_urgent", any(keyword in problem_text.lower() for keyword in urgent_keywords))
     logger.info(f"Saving request for user {chat_id}: user_data={context.user_data}, is_urgent={is_urgent}")
 
