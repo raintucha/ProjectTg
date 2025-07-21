@@ -130,6 +130,8 @@ def init_db():
                     registration_date TIMESTAMP NOT NULL
                 )
             """)
+            
+            # --- ИЗМЕНЕНИЕ ТУТ ---
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS issues (
                     issue_id SERIAL PRIMARY KEY,
@@ -141,10 +143,13 @@ def init_db():
                     created_at TIMESTAMP NOT NULL,
                     completed_at TIMESTAMP,
                     closed_by BIGINT,
+                    media_file_id TEXT, -- <<<<<<<<<<<<<<< ВОТ ЭТА СТРОКА ДОБАВЛЕНА
                     FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
                     FOREIGN KEY (closed_by) REFERENCES users(user_id) ON DELETE SET NULL
                 )
             """)
+            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS issue_logs (
                     log_id SERIAL PRIMARY KEY,
