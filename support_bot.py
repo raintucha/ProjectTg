@@ -1411,7 +1411,6 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if conn:
             release_db_connection(conn)
 
-from datetime import datetime, timezone, timedelta  # Add this import
 
 APP_TIMEZONE = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", 5))))
 
