@@ -14,8 +14,8 @@ from telegram.ext import (
     filters,
     ContextTypes,
     CallbackQueryHandler,
-    JobQueue,  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
-
+    JobQueue,
+    ConversationHandler  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
 )
 import psycopg2
 from fpdf import FPDF # fpdf2 использует тот же синтаксис импорта для совместимости
@@ -28,6 +28,10 @@ from telegram.error import NetworkError, TimedOut
 from telegram.ext import MessageHandler, filters
 import speech_recognition as sr
 from pydub import AudioSegment
+CHOOSE_REQUEST_TYPE, GET_TEXT_REQUEST, CHOOSE_VOICE_LANGUAGE, GET_VOICE_REQUEST, GET_PHOTO_REQUEST, GET_VIDEO_REQUEST = range(6)
+
+URGENT_KEYWORDS = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
+
 # Явно укажем, что это веб-сервис
 WEB_SERVICE = True
 PORT = int(os.getenv("PORT", 8080))
@@ -3310,20 +3314,16 @@ if not os.path.exists("voice_messages"):
     os.makedirs("voice_messages")
 
 # И ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает входящее голосовое сообщение, распознает речь и отправляет подтверждение.
-    """
-    ogg_filepath = ""
-    wav_filepath = ""
-    try:
-        # Проверяем, что пользователь начал процесс подачи заявки
-        if not context.user_data.get("user_name"):
-            await update.message.reply_text(
-                "Пожалуйста, сначала начните процесс подачи заявки через меню, чтобы я знал ваши данные. Нажмите /start и выберите 'Подать заявку'."
-            )
-            return
+# support_bot.py
 
+# ЗАМЕНИТЕ ВАШУ ФУНКЦИЮ ОБРАБОТКИ ГОЛОСА НА ЭТУ
+
+# И ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
+async def get_voice_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает голосовое сообщение, распознает и создает заявку."""
+    ogg_filepath = None
+    wav_filepath = None
+    try:
         voice = update.message.voice
         voice_file = await voice.get_file()
 
@@ -3337,51 +3337,43 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_filepath) as source:
             audio_data = recognizer.record(source)
-            text_from_voice = ""
-            try:
-                logger.info("Пытаюсь распознать речь на казахском языке...")
-                text_from_voice = recognizer.recognize_google(audio_data, language="kk-KZ")
-                logger.info(f"Распознано на казахском: '{text_from_voice}'")
-            except sr.UnknownValueError:
-                logger.info("На казахском не распознано. Пытаюсь распознать на русском...")
-                try:
-                    text_from_voice = recognizer.recognize_google(audio_data, language="ru-RU")
-                    logger.info(f"Распознано на русском: '{text_from_voice}'")
-                except sr.UnknownValueError:
-                    logger.warning("Не удалось распознать речь ни на одном из языков.")
-                    await update.message.reply_text("К сожалению, я не смог разобрать речь. Попробуйте сказать четче или напишите, пожалуйста, текстом.")
-                    return
+
+        # Получаем язык, который пользователь выбрал на предыдущем шаге
+        lang_code = context.user_data.get('language', 'ru-RU')
+        
+        try:
+            text_from_voice = recognizer.recognize_google(audio_data, language=lang_code)
+            logger.info(f"Распознан текст ({lang_code}): '{text_from_voice}'")
             
-            # Вызываем вашу функцию сохранения и получаем номер заявки
             issue_id = await save_request_to_db(update, context, text_from_voice)
 
-            # Отправляем подтверждение пользователю
-            await update.message.reply_text(
-                f"✅ **Ваша заявка #{issue_id} по голосовому сообщению принята!**\n\n"
-                f"**Текст заявки:**\n_{text_from_voice}_\n\n"
-                "Ожидайте, в ближайшее время с вами свяжется наш специалист.",
-                parse_mode='Markdown'
-            )
-            
-            # Сбрасываем состояние, чтобы можно было создать новую заявку
-            context.user_data.clear()
-            await main_menu(update, context)
+            if issue_id:
+                await update.message.reply_text(
+                    f"✅ **Ваша заявка #{issue_id} по голосовому сообщению принята!**\n\n"
+                    f"**Текст заявки:**\n_{text_from_voice}_\n\n"
+                    "Ожидайте ответа.",
+                    parse_mode='Markdown'
+                )
+                context.user_data.clear()
+                await main_menu(update, context)
+            else:
+                await update.message.reply_text("Произошла ошибка при сохранении заявки.")
 
-    except (ValueError, psycopg2.Error) as e:
-        # Ловим ошибки валидации или базы данных из save_request_to_db
-        logger.error(f"Ошибка при сохранении голосовой заявки: {e}")
-        await update.message.reply_text(f"Не удалось сохранить вашу заявку из-за ошибки: {e}\nПожалуйста, попробуйте еще раз.")
-    except sr.RequestError as e:
-        logger.error(f"Ошибка сервиса Google Speech Recognition; {e}")
-        await update.message.reply_text("Произошла ошибка с сервисом распознавания речи.")
+        except sr.UnknownValueError:
+            await update.message.reply_text("Не удалось распознать речь. Попробуйте сказать четче.")
+        except sr.RequestError:
+            await update.message.reply_text("Произошла ошибка с сервисом распознавания речи.")
+            
     except Exception as e:
-        logger.error(f"Критическая ошибка при обработке голосового сообщения: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при обработке голоса: {e}", exc_info=True)
         await update.message.reply_text("Произошла внутренняя ошибка при обработке вашего сообщения.")
     finally:
-        if os.path.exists(ogg_filepath):
+        if ogg_filepath and os.path.exists(ogg_filepath):
             os.remove(ogg_filepath)
-        if os.path.exists(wav_filepath):
+        if wav_filepath and os.path.exists(wav_filepath):
             os.remove(wav_filepath)
+            
+    return ConversationHandler.END
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -3394,9 +3386,125 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Получено фото от пользователя {update.effective_user.id}")
 
 # >>> КОНЕЦ КОДА ИЗ MULTIMEDIA_HANDLERS.PY <<<
+# support_bot.py (перед функцией main)
 
+async def new_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог создания новой заявки."""
+    keyboard = [
+        [InlineKeyboardButton("✍️ Текстовое сообщение", callback_data='text_request')],
+        [InlineKeyboardButton("🎤 Голосовое сообщение", callback_data='voice_request')],
+        [InlineKeyboardButton("🖼️ Фото", callback_data='photo_request')],
+        [InlineKeyboardButton("📹 Видео", callback_data='video_request')],
+        [InlineKeyboardButton("❌ Отмена", callback_data='cancel_request')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.callback_query.message.reply_text(
+        "Пожалуйста, выберите тип вашей заявки:",
+        reply_markup=reply_markup
+    )
+    return CHOOSE_REQUEST_TYPE
+
+# ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
+async def choose_request_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор типа заявки."""
+    query = update.callback_query
+    await query.answer()
+    request_type = query.data
+
+    if request_type == 'text_request':
+        await query.edit_message_text("Пожалуйста, опишите вашу проблему текстом:")
+        return GET_TEXT_REQUEST
+        
+    elif request_type == 'voice_request':
+        keyboard = [
+            [
+                # ИЗМЕНЕНИЕ: Добавляем полные коды языков для совместимости
+                InlineKeyboardButton("Русский", callback_data='lang_ru-RU'),
+                InlineKeyboardButton("Қазақша", callback_data='lang_kk-KZ')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("На каком языке вам удобнее говорить?", reply_markup=reply_markup)
+        return CHOOSE_VOICE_LANGUAGE
+        
+    elif request_type == 'photo_request':
+        await query.edit_message_text("Пожалуйста, отправьте фото и обязательно добавьте к нему текстовое описание проблемы в одном сообщении.")
+        return GET_PHOTO_REQUEST
+        
+    elif request_type == 'video_request':
+        await query.edit_message_text("Пожалуйста, отправьте видео и обязательно добавьте к нему текстовое описание проблемы в одном сообщении.")
+        return GET_VIDEO_REQUEST
+
+async def choose_voice_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет выбор языка и просит отправить голосовое сообщение."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Сохраняем выбранный язык в 'user_data'
+    context.user_data['language'] = query.data.split('_')[1] # 'ru' или 'kk'
+    
+    language_map = {'ru': 'русском', 'kk': 'казахском'}
+    selected_lang_text = language_map.get(context.user_data['language'])
+    
+    await query.edit_message_text(f"Отлично! Теперь запишите и отправьте мне голосовое сообщение на {selected_lang_text} языке.")
+    return GET_VOICE_REQUEST
+
+async def get_text_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает текстовое сообщение и создает заявку."""
+    # Используем вашу существующую функцию, она идеально подходит
+    await process_problem_report(update, context)
+    return ConversationHandler.END
+
+async def get_photo_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает фото с описанием и создает заявку."""
+    photo = update.message.photo[-1]
+    description = update.message.caption or "Без описания"
+    
+    # Определяем срочность по ключевым словам в описании
+    is_urgent = any(word in description.lower() for word in URGENT_KEYWORDS)
+    
+    # Формируем текст проблемы
+    problem_text = f"[Фото] {description}"
+    
+    issue_id = await save_request_to_db(update, context, problem_text)
+    
+    if issue_id:
+        await update.message.reply_text(f"✅ Ваша заявка #{issue_id} с фото принята!", parse_mode='Markdown')
+        context.user_data.clear()
+        await main_menu(update, context)
+    else:
+        await update.message.reply_text("Произошла ошибка при сохранении вашей заявки.")
+        
+    return ConversationHandler.END
+
+async def get_video_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает видео с описанием и создает заявку."""
+    description = update.message.caption or "Без описания"
+    
+    # Формируем текст проблемы
+    problem_text = f"[Видео] {description}"
+    
+    issue_id = await save_request_to_db(update, context, problem_text)
+    
+    if issue_id:
+        await update.message.reply_text(f"✅ Ваша заявка #{issue_id} с видео принята!", parse_mode='Markdown')
+        context.user_data.clear()
+        await main_menu(update, context)
+    else:
+        await update.message.reply_text("Произошла ошибка при сохранении вашей заявки.")
+        
+    return ConversationHandler.END
+
+async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет процесс создания заявки."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Создание заявки отменено.")
+    return ConversationHandler.END
 # Remove the standalone application.add_handler line
 # Update the main() function (near the end of the file) as follows:
+# ПОЛНОСТЬЮ ЗАМЕНИТЕ ВАШУ ФУНКЦИЮ main
 def main() -> None:
     """Run the bot with auto-restart."""
     if not TELEGRAM_TOKEN:
@@ -3407,9 +3515,6 @@ def main() -> None:
         bot = telegram.Bot(token=TELEGRAM_TOKEN)
         bot.get_me()
         logger.info("Telegram token validated successfully")
-    except telegram.error.InvalidToken:
-        logger.error("Invalid TELEGRAM_TOKEN")
-        raise ValueError("Invalid TELEGRAM_TOKEN")
     except Exception as e:
         logger.error(f"Error validating TELEGRAM_TOKEN: {e}")
         raise
@@ -3428,24 +3533,38 @@ def main() -> None:
                 .build()
             )
 
+            # --- НОВЫЙ ОБРАБОТЧИК ДЛЯ СОЗДАНИЯ ЗАЯВОК ---
+            request_conv_handler = ConversationHandler(
+                entry_points=[CallbackQueryHandler(new_request_start, pattern='^new_request$')],
+                states={
+                    CHOOSE_REQUEST_TYPE: [
+                        CallbackQueryHandler(choose_request_type, pattern='^(text_request|voice_request|photo_request|video_request)$')
+                    ],
+                    GET_TEXT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_text_request)],
+                    CHOOSE_VOICE_LANGUAGE: [CallbackQueryHandler(choose_voice_language, pattern='^lang_(ru-RU|kk-KZ)$')],
+                    GET_VOICE_REQUEST: [MessageHandler(filters.VOICE, get_voice_request)],
+                    GET_PHOTO_REQUEST: [MessageHandler(filters.PHOTO, get_photo_request)],
+                    GET_VIDEO_REQUEST: [MessageHandler(filters.VIDEO, get_video_request)],
+                },
+                fallbacks=[CallbackQueryHandler(cancel_request, pattern='^cancel_request$')],
+            )
+
             # --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
+            
+            # Добавляем наш новый диалог
+            application.add_handler(request_conv_handler)
+            
+            # Этот обработчик кнопок нужен для всего, КРОМЕ кнопки "new_request"
             application.add_handler(CallbackQueryHandler(button_handler))
 
-            # --- ВОТ ИЗМЕНЕНИЯ ---
-            # 1. Добавляем обработчик для голосовых сообщений
-            application.add_handler(MessageHandler(filters.VOICE, handle_voice))
-
-            # 2. Добавляем обработчик для фото
-            application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-            # ---------------------
-
+            # Этот обработчик будет ловить текстовые сообщения, если мы не находимся в диалоге
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data, block=False))
             application.add_error_handler(error_handler)
 
-            # Schedule overdue notifications every 6 hours
+            # Планировщик задач
             application.job_queue.run_repeating(
                 send_overdue_notifications,
                 interval=6*60*60,
@@ -3453,23 +3572,15 @@ def main() -> None:
             )
 
             logger.info("🚀 Starting bot polling...")
-            application.run_polling(
-                drop_pending_updates=True,
-                close_loop=False,
-                allowed_updates=Update.ALL_TYPES
-            )
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+
         except KeyboardInterrupt:
             logger.info("🛑 Bot stopped by user")
-            stop_health_server()
-            global db_pool
-            if db_pool:
-                db_pool.closeall()
-                logger.info("Database connection pool closed")
+            # ... (ваш код остановки)
             break
         except Exception as e:
             logger.error(f"⚠️ Bot crashed: {str(e)[:200]}")
-            stop_health_server()
-            logger.info("🔄 Restarting in 10 seconds...")
+            # ... (ваш код перезапуска)
             time.sleep(10)
 
 if __name__ == '__main__':
