@@ -26,8 +26,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import MessageHandler, filters
-import speech_recognition as sr
-from pydub import AudioSegment
 CHOOSE_REQUEST_TYPE, GET_TEXT_REQUEST, CHOOSE_VOICE_LANGUAGE, GET_VOICE_REQUEST, GET_PHOTO_REQUEST, GET_VIDEO_REQUEST = range(6)
 
 URGENT_KEYWORDS = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
