@@ -3329,62 +3329,44 @@ if not os.path.exists("voice_messages"):
 
 # И ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
 async def get_voice_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает гс, распознает, сохраняет file_id и создает заявку."""
-    ogg_filepath = None
-    wav_filepath = None
+    """
+    Получает голосовое сообщение, сохраняет его file_id и создает заявку.
+    Речь в текст больше не переводится.
+    """
     try:
-        voice = update.message.voice
-        voice_file = await voice.get_file()
-        voice_file_id = voice.file_id  # Сохраняем ID файла
-
-        ogg_filepath = os.path.join("voice_messages", f"{voice.file_id}.ogg")
-        wav_filepath = os.path.join("voice_messages", f"{voice.file_id}.wav")
-
-        await voice_file.download_to_drive(ogg_filepath)
-        audio = AudioSegment.from_ogg(ogg_filepath)
-        audio.export(wav_filepath, format="wav")
-
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_filepath) as source:
-            audio_data = recognizer.record(source)
+        # Просто получаем ID файла, ничего не скачивая и не распознавая
+        voice_file_id = update.message.voice.file_id
         
-        lang_code = context.user_data.get('language', 'ru-RU')
+        # В качестве описания используем статичный текст-заглушку
+        problem_text = "[Голосовое сообщение]"
         
-        try:
-            text_from_voice = recognizer.recognize_google(audio_data, language=lang_code)
-            logger.info(f"Распознан текст ({lang_code}): '{text_from_voice}'")
-            
-            problem_text = f"[Голосовое сообщение] {text_from_voice}"
-            issue_id = await save_request_to_db(update, context, problem_text, media_file_id=voice_file_id)
+        # Сохраняем заявку в базу данных с file_id
+        issue_id = await save_request_to_db(update, context, problem_text, media_file_id=voice_file_id)
 
-            if issue_id:
-                await update.message.reply_text(
-                    f"✅ **Ваша заявка #{issue_id} по голосовому сообщению принята!**\n\n"
-                    f"**Текст заявки:**\n_{text_from_voice}_\n\n"
-                    "Ожидайте ответа.",
-                    parse_mode='Markdown'
-                )
-                context.user_data.clear()
-                await main_menu(update, context)
-            else:
-                await update.message.reply_text("Произошла ошибка при сохранении заявки.")
+        # Получаем роль и тип пользователя для корректного отображения меню
+        user_id = update.effective_user.id
+        role = await get_user_role(user_id)
+        user_type = await get_user_type(user_id)
 
-        except sr.UnknownValueError:
-            await update.message.reply_text("Не удалось распознать речь. Попробуйте сказать четче.")
-        except sr.RequestError:
-            await update.message.reply_text("Произошла ошибка с сервисом распознавания речи.")
-            
+        # Отправляем подтверждение вместе с кнопками главного меню
+        await send_and_remember(
+            update,
+            context,
+            f"✅ Ваша заявка #{issue_id} с голосовым сообщением принята.",
+            main_menu_keyboard(user_id, role, is_in_main_menu=True, user_type=user_type)
+        )
+        
+        return ConversationHandler.END
+
     except Exception as e:
-        logger.error(f"Критическая ошибка при обработке голоса: {e}", exc_info=True)
-        await update.message.reply_text("Произошла внутренняя ошибка при обработке вашего сообщения.")
-    finally:
-        if ogg_filepath and os.path.exists(ogg_filepath):
-            os.remove(ogg_filepath)
-        if wav_filepath and os.path.exists(wav_filepath):
-            os.remove(wav_filepath)
-            
-    return ConversationHandler.END
-
+        logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)
+        await send_and_remember(
+            update,
+            context,
+            "❌ Произошла ошибка при обработке вашего голосового сообщения. Попробуйте еще раз."
+        )
+        return ConversationHandler.END
+    
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработчик для фотографий (пока заглушка).
