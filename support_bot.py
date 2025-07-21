@@ -1577,8 +1577,8 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        # Pagination
-        page = context.user_data.get(f"active_requests_page_{user_id}", 0)  # Per-user pagination
+        page_key = f"active_requests_page_{user_id}"
+        page = context.user_data.get(page_key, 0)
         items_per_page = 5
         start_index = page * items_per_page
         end_index = start_index + items_per_page
@@ -1595,9 +1595,20 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard = []
         for req in paginated_requests:
             issue_id, full_name, description, created_at, category = req
+            
+            # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+            display_description = description
+            if description.startswith("[Фото]"):
+                display_description = "🖼️ " + description.replace("[Фото] ", "", 1)
+            elif description.startswith("[Видео]"):
+                display_description = "📹 " + description.replace("[Видео] ", "", 1)
+            elif description.startswith("[Голосовое сообщение]"):
+                display_description = "🎤 " + description.replace("[Голосовое сообщение] ", "", 1)
+            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
             text += (
                 f"🆔 #{issue_id} от {created_at.strftime('%d.%m')} - {full_name}\n"
-                f"📝 {description[:40]}{'...' if len(description) > 40 else ''}\n"
+                f"📝 {display_description[:40]}{'...' if len(display_description) > 40 else ''}\n"
                 f"{'🚨 Срочная' if category == 'urgent' else '📋 Обычная'}\n\n"
             )
             keyboard.append([InlineKeyboardButton(f"🔍 Смотреть заявку #{issue_id}", callback_data=f"request_detail_{issue_id}")])
@@ -1645,7 +1656,6 @@ async def show_request_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # ИЗМЕНЕНИЕ: Добавляем media_file_id в SQL-запрос
             cur.execute(
                 """
                 SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.chat_id, r.address, r.phone, i.media_file_id
@@ -1663,6 +1673,16 @@ async def show_request_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         (issue_id, full_name, description, created_at, category, resident_chat_id, address, phone, media_file_id) = request_data
 
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        display_description = description
+        if description.startswith("[Фото]"):
+            display_description = "🖼️ " + description.replace("[Фото] ", "", 1)
+        elif description.startswith("[Видео]"):
+            display_description = "📹 " + description.replace("[Видео] ", "", 1)
+        elif description.startswith("[Голосовое сообщение]"):
+            display_description = "🎤 " + description.replace("[Голосовое сообщение] ", "", 1)
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
         text = (
             f"📄 **Детали заявки #{issue_id}**\n\n"
             f"👤 **От:** {full_name}\n"
@@ -1670,7 +1690,7 @@ async def show_request_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"📞 **Телефон:** {phone}\n"
             f"📅 **Дата:** {created_at.strftime('%d.%m.%Y %H:%M')}\n"
             f"🚨 **Тип:** {'Срочная' if category == 'urgent' else 'Обычная'}\n\n"
-            f"📝 **Описание проблемы:**\n{description}"
+            f"📝 **Описание проблемы:**\n{display_description}" # Используем очищенный текст
         )
         
         keyboard = [
@@ -1679,13 +1699,11 @@ async def show_request_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("🔙 Назад к списку", callback_data="active_requests")],
         ]
         
-        # Отправляем текстовое описание
         await send_and_remember(update, context, text, InlineKeyboardMarkup(keyboard))
         
-        # --- НОВАЯ ЛОГИКА: ОТПРАВКА МЕДИАФАЙЛА ---
         if media_file_id:
             try:
-                # Отправляем медиафайл отдельным сообщением
+                # Здесь логика не меняется, мы по-прежнему используем исходное 'description' для проверки
                 if description.startswith("[Фото]"):
                     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=media_file_id)
                 elif description.startswith("[Видео]"):
