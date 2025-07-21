@@ -1293,9 +1293,9 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 # ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
-async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, problem_text: str) -> int:
+async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, problem_text: str, media_file_id: str = None) -> int:
     """
-    Сохраняет заявку в базу данных, используя переданный текст, и возвращает ее ID.
+    Сохраняет заявку в базу данных, включая опциональный ID медиафайла, и возвращает ее ID.
     """
     chat_id = update.effective_user.id
     role = await get_user_role(chat_id)
@@ -1303,16 +1303,12 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
     address = context.user_data.get("user_address", "Админ" if role == SUPPORT_ROLES["admin"] else None)
     phone = context.user_data.get("user_phone", None)
     
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-    # Мы напрямую используем problem_text, переданный из голосового сообщения.
-    # Это исправляет ошибку, когда текст мог браться из старых данных.
     current_problem_text = problem_text 
     
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
     is_urgent = context.user_data.get("is_urgent", any(keyword in current_problem_text.lower() for keyword in urgent_keywords))
     logger.info(f"Saving request for user {chat_id}: user_data={context.user_data}, is_urgent={is_urgent}")
 
-    # (Далее весь ваш код валидации остается без изменений)
     if role != SUPPORT_ROLES["admin"]:
         required_fields = {
             "user_name": full_name,
@@ -1326,32 +1322,26 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             raise ValueError(f"Отсутствуют данные: {', '.join(missing_fields)}")
         
         type_errors = []
-        if not isinstance(full_name, str):
-            type_errors.append("user_name должен быть строкой")
-        if not isinstance(address, str):
-            type_errors.append("user_address должен быть строкой")
-        if not isinstance(phone, str):
-            type_errors.append("user_phone должен быть строкой")
-        if not isinstance(current_problem_text, str):
-            type_errors.append("problem_text должен быть строкой")
+        if not isinstance(full_name, str): type_errors.append("user_name должен быть строкой")
+        if not isinstance(address, str): type_errors.append("user_address должен быть строкой")
+        if not isinstance(phone, str): type_errors.append("user_phone должен быть строкой")
+        if not isinstance(current_problem_text, str): type_errors.append("problem_text должен быть строкой")
         if type_errors:
             logger.error(f"Type errors in save_request_to_db for user {chat_id}: {type_errors}")
             raise ValueError(f"Ошибка в формате данных: {', '.join(type_errors)}")
 
     resident_id = None
-    issue_id = None # Определяем переменную заранее
+    issue_id = None
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # (Весь ваш код регистрации пользователя и резидента остается без изменений)
             cur.execute("SELECT 1 FROM users WHERE user_id = %s", (chat_id,))
             if not cur.fetchone():
                 username = update.effective_user.username
                 cur.execute(
                     """
                     INSERT INTO users (user_id, username, full_name, role, registration_date)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
+                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name
                     """,
                     (chat_id, username, full_name, SUPPORT_ROLES["user"], datetime.now()),
                 )
@@ -1365,43 +1355,38 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     resident_id = resident[0]
                 else:
                     cur.execute(
-                        """
-                        INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
-                        VALUES (%s, %s, %s, %s, %s) RETURNING resident_id
-                        """,
+                        "INSERT INTO residents (chat_id, full_name, address, phone, registration_date) VALUES (%s, %s, %s, %s, %s) RETURNING resident_id",
                         (chat_id, full_name, address, phone, datetime.now()),
                     )
                     resident_id = cur.fetchone()[0]
                     conn.commit()
             
-            # (Ваш код сохранения заявки и логов остается почти без изменений)
+            # ИЗМЕНЕНИЕ: Добавляем media_file_id в запрос
             cur.execute(
                 """
-                INSERT INTO issues (resident_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, %s, %s) RETURNING issue_id
+                INSERT INTO issues (resident_id, description, category, status, created_at, media_file_id)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING issue_id
                 """,
-                (resident_id, current_problem_text, "urgent" if is_urgent else "normal", "new", datetime.now()),
+                (resident_id, current_problem_text, "urgent" if is_urgent else "normal", "new", datetime.now(), media_file_id),
             )
             issue_id = cur.fetchone()[0]
             conn.commit()
-            logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
+            logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id} with media_file_id: {media_file_id}")
             
             cur.execute(
                 """
-                INSERT INTO issue_logs (issue_id, user_id, action, details, action_time)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO issue_logs (issue_id, user_id, action, details, action_time) VALUES (%s, %s, %s, %s, %s)
                 """,
                 (issue_id, chat_id, "created", f"Новая заявка от {full_name}: {current_problem_text}", datetime.now()),
             )
             conn.commit()
             logger.info(f"Logged issue creation for issue ID {issue_id}")
 
-        # Вызываем отправку срочного уведомления, если нужно
         if is_urgent:
              context.user_data['problem_text'] = current_problem_text
              await send_urgent_alert(update, context, issue_id)
 
-        return issue_id # Возвращаем номер заявки
+        return issue_id
 
     except psycopg2.Error as e:
         logger.error(f"Database error in save_request_to_db for user {chat_id}: {e}", exc_info=True)
@@ -1650,10 +1635,8 @@ async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # support_bot.py
 
-async def show_request_detail(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int
-):
-    """Show detailed request information including address and phone."""
+async def show_request_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int):
+    """Показывает детальную информацию о заявке, включая прикрепленный медиафайл."""
     if not await is_agent(update.effective_user.id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
@@ -1662,10 +1645,10 @@ async def show_request_detail(
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # ИЗМЕНЕНИЕ: Добавляем r.address и r.phone в SQL-запрос
+            # ИЗМЕНЕНИЕ: Добавляем media_file_id в SQL-запрос
             cur.execute(
                 """
-                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.chat_id, r.address, r.phone
+                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category, r.chat_id, r.address, r.phone, i.media_file_id
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.issue_id = %s
@@ -1678,10 +1661,8 @@ async def show_request_detail(
             await update.callback_query.answer("Заявка не найдена", show_alert=True)
             return
 
-        # ИЗМЕНЕНИЕ: Распаковываем все полученные данные
-        (issue_id, full_name, description, created_at, category, resident_chat_id, address, phone) = request_data
+        (issue_id, full_name, description, created_at, category, resident_chat_id, address, phone, media_file_id) = request_data
 
-        # ИЗМЕНЕНИЕ: Формируем полный и подробный текст отчета
         text = (
             f"📄 **Детали заявки #{issue_id}**\n\n"
             f"👤 **От:** {full_name}\n"
@@ -1693,32 +1674,33 @@ async def show_request_detail(
         )
         
         keyboard = [
-            [
-                InlineKeyboardButton(
-                    "✅ Завершить заявку", callback_data=f"complete_request_{issue_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📨 Написать пользователю", callback_data=f"message_user_{resident_chat_id}"
-                )
-            ],
+            [InlineKeyboardButton("✅ Завершить заявку", callback_data=f"complete_request_{issue_id}")],
+            [InlineKeyboardButton("📨 Написать пользователю", callback_data=f"message_user_{resident_chat_id}")],
             [InlineKeyboardButton("🔙 Назад к списку", callback_data="active_requests")],
         ]
+        
+        # Отправляем текстовое описание
+        await send_and_remember(update, context, text, InlineKeyboardMarkup(keyboard))
+        
+        # --- НОВАЯ ЛОГИКА: ОТПРАВКА МЕДИАФАЙЛА ---
+        if media_file_id:
+            try:
+                # Отправляем медиафайл отдельным сообщением
+                if description.startswith("[Фото]"):
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=media_file_id)
+                elif description.startswith("[Видео]"):
+                    await context.bot.send_video(chat_id=update.effective_chat.id, video=media_file_id)
+                elif description.startswith("[Голосовое сообщение]"):
+                    await context.bot.send_voice(chat_id=update.effective_chat.id, voice=media_file_id)
+            except Exception as e:
+                logger.error(f"Не удалось отправить медиафайл {media_file_id} для заявки #{issue_id}: {e}")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Не удалось загрузить прикрепленный медиафайл.")
 
-        await send_and_remember(
-            update,
-            context,
-            text,
-            InlineKeyboardMarkup(keyboard),
-        )
     except psycopg2.Error as e:
         logger.error(f"Error retrieving request details for issue {issue_id}: {e}")
         await send_and_remember(
-            update,
-            context,
-            "❌ Ошибка при получении данных.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            update, context, "❌ Ошибка при получении данных.", 
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id))
         )
     finally:
         if conn:
@@ -2247,10 +2229,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     Обрабатывает ВСЕ кнопки, КРОМЕ тех, что запускают диалоги (например, 'new_request').
     """
     query = update.callback_query
-    await query.answer()
     
+    # Игнорируем new_request, так как он обрабатывается ConversationHandler
+    if query.data == 'new_request':
+        await query.answer()
+        return
+
+    await query.answer()
     user_id = update.effective_user.id
     role = await get_user_role(user_id, context)
+    # ... (здесь идет остальная часть вашей функции button_handler без изменений)
+    # ... (elif query.data == "my_requests": и т.д.)
     user_type = context.user_data.get("user_type", "unknown")
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
@@ -3320,12 +3309,13 @@ if not os.path.exists("voice_messages"):
 
 # И ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
 async def get_voice_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает голосовое сообщение, распознает и создает заявку."""
+    """Получает гс, распознает, сохраняет file_id и создает заявку."""
     ogg_filepath = None
     wav_filepath = None
     try:
         voice = update.message.voice
         voice_file = await voice.get_file()
+        voice_file_id = voice.file_id  # Сохраняем ID файла
 
         ogg_filepath = os.path.join("voice_messages", f"{voice.file_id}.ogg")
         wav_filepath = os.path.join("voice_messages", f"{voice.file_id}.wav")
@@ -3337,15 +3327,15 @@ async def get_voice_request(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_filepath) as source:
             audio_data = recognizer.record(source)
-
-        # Получаем язык, который пользователь выбрал на предыдущем шаге
+        
         lang_code = context.user_data.get('language', 'ru-RU')
         
         try:
             text_from_voice = recognizer.recognize_google(audio_data, language=lang_code)
             logger.info(f"Распознан текст ({lang_code}): '{text_from_voice}'")
             
-            issue_id = await save_request_to_db(update, context, text_from_voice)
+            problem_text = f"[Голосовое сообщение] {text_from_voice}"
+            issue_id = await save_request_to_db(update, context, problem_text, media_file_id=voice_file_id)
 
             if issue_id:
                 await update.message.reply_text(
@@ -3491,58 +3481,56 @@ async def choose_voice_language(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
-    # Сохраняем выбранный язык в 'user_data'
-    context.user_data['language'] = query.data.split('_')[1] # 'ru' или 'kk'
+    # ИСПРАВЛЕНО: Правильно извлекаем код языка (например, 'ru-RU')
+    lang_code = query.data.split('_')[1] 
+    context.user_data['language'] = lang_code
     
-    language_map = {'ru': 'русском', 'kk': 'казахском'}
-    selected_lang_text = language_map.get(context.user_data['language'])
+    # ИСПРАВЛЕНО: Правильно находим текстовое описание языка
+    language_map = {'ru-RU': 'русском', 'kk-KZ': 'казахском'}
+    selected_lang_text = language_map.get(lang_code, "выбранном")
     
     await query.edit_message_text(f"Отлично! Теперь запишите и отправьте мне голосовое сообщение на {selected_lang_text} языке.")
     return GET_VOICE_REQUEST
 
 async def get_text_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получает текстовое сообщение и создает заявку."""
-    # Используем вашу существующую функцию, она идеально подходит
+    # ИСПРАВЛЕНО: Добавляем флаг, который ожидает ваша функция process_problem_report
+    context.user_data['awaiting_problem'] = True
+    
     await process_problem_report(update, context)
     return ConversationHandler.END
 
 async def get_photo_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает фото с описанием и создает заявку."""
-    photo = update.message.photo[-1]
+    """Получает фото, описание, сохраняет file_id и создает заявку."""
     description = update.message.caption or "Без описания"
-    
-    # Определяем срочность по ключевым словам в описании
-    is_urgent = any(word in description.lower() for word in URGENT_KEYWORDS)
-    
-    # Формируем текст проблемы
     problem_text = f"[Фото] {description}"
-    
-    issue_id = await save_request_to_db(update, context, problem_text)
+    photo_file_id = update.message.photo[-1].file_id
+
+    issue_id = await save_request_to_db(update, context, problem_text, media_file_id=photo_file_id)
     
     if issue_id:
         await update.message.reply_text(f"✅ Ваша заявка #{issue_id} с фото принята!", parse_mode='Markdown')
         context.user_data.clear()
         await main_menu(update, context)
     else:
-        await update.message.reply_text("Произошла ошибка при сохранении вашей заявки.")
+        await update.message.reply_text("Произошла ошибка при сохранении заявки.")
         
     return ConversationHandler.END
 
 async def get_video_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает видео с описанием и создает заявку."""
+    """Получает видео, описание, сохраняет file_id и создает заявку."""
     description = update.message.caption or "Без описания"
-    
-    # Формируем текст проблемы
     problem_text = f"[Видео] {description}"
-    
-    issue_id = await save_request_to_db(update, context, problem_text)
+    video_file_id = update.message.video.file_id
+
+    issue_id = await save_request_to_db(update, context, problem_text, media_file_id=video_file_id)
     
     if issue_id:
         await update.message.reply_text(f"✅ Ваша заявка #{issue_id} с видео принята!", parse_mode='Markdown')
         context.user_data.clear()
         await main_menu(update, context)
     else:
-        await update.message.reply_text("Произошла ошибка при сохранении вашей заявки.")
+        await update.message.reply_text("Произошла ошибка при сохранении заявки.")
         
     return ConversationHandler.END
 
@@ -3587,9 +3575,7 @@ def main() -> None:
             request_conv_handler = ConversationHandler(
                 entry_points=[CallbackQueryHandler(new_request_start, pattern='^new_request$')],
                 states={
-                    CHOOSE_REQUEST_TYPE: [
-                        CallbackQueryHandler(choose_request_type, pattern='^(text|voice|photo|video)_request$')
-                    ],
+                    CHOOSE_REQUEST_TYPE: [CallbackQueryHandler(choose_request_type, pattern='^(text|voice|photo|video)_request$')],
                     GET_TEXT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_text_request)],
                     CHOOSE_VOICE_LANGUAGE: [CallbackQueryHandler(choose_voice_language, pattern='^lang_(ru-RU|kk-KZ)$')],
                     GET_VOICE_REQUEST: [MessageHandler(filters.VOICE, get_voice_request)],
@@ -3598,6 +3584,7 @@ def main() -> None:
                 },
                 fallbacks=[CallbackQueryHandler(cancel_request, pattern='^cancel_request$')],
             )
+
 
             # --- РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ---
             
@@ -3613,7 +3600,7 @@ def main() -> None:
             application.add_handler(CallbackQueryHandler(button_handler))
 
             # 4. Обработчик для текстовых сообщений вне диалогов
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data, block=False))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data))
             
             # 5. Обработчик ошибок
             application.add_error_handler(error_handler)
