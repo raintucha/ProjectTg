@@ -4,3 +4,5 @@ python-dotenv==1.1.1
 fpdf2==2.8.3
 tzlocal==5.3.1
 httpx==0.28.1
+SpeechRecognition==3.10.4
+pydub==0.25.1
