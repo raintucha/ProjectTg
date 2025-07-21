@@ -3321,8 +3321,7 @@ if not os.path.exists("voice_messages"):
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обрабатывает входящее голосовое сообщение.
-    Пытается распознать речь сначала на казахском, затем на русском языке.
+    Обрабатывает входящее голосовое сообщение, распознает речь и сразу сохраняет заявку.
     """
     ogg_filepath = ""
     wav_filepath = ""
@@ -3350,13 +3349,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             text_from_voice = ""
             try:
-                # 1. Первая попытка: распознать на казахском языке
                 logger.info("Пытаюсь распознать речь на казахском языке...")
                 text_from_voice = recognizer.recognize_google(audio_data, language="kk-KZ")
                 logger.info(f"Распознано на казахском: '{text_from_voice}'")
-
             except sr.UnknownValueError:
-                # 2. Вторая попытка: если на казахском не вышло, пробую на русском
                 logger.info("На казахском не распознано. Пытаюсь распознать на русском...")
                 try:
                     text_from_voice = recognizer.recognize_google(audio_data, language="ru-RU")
@@ -3364,15 +3360,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except sr.UnknownValueError:
                     logger.warning("Не удалось распознать речь ни на одном из языков.")
                     await update.message.reply_text("К сожалению, я не смог разобрать речь. Попробуйте сказать четче или напишите, пожалуйста, текстом.")
-                    return # Выходим, так как речь не распознана
+                    return
 
-            # Если текст был успешно распознан на одном из языков
-            original_text = update.message.text
-            update.message.text = text_from_voice
-            
-            await process_problem_report(update, context)
-            
-            update.message.text = original_text
+            # ИЗМЕНЕНИЕ ЗДЕСЬ: Вызываем функцию сохранения напрямую
+            await save_request_to_db(update, context, text_from_voice)
 
     except sr.RequestError as e:
         logger.error(f"Ошибка сервиса Google Speech Recognition; {e}")
@@ -3381,7 +3372,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)
         await update.message.reply_text("Произошла внутренняя ошибка при обработке вашего сообщения.")
     finally:
-        # Удаляем временные файлы
         if os.path.exists(ogg_filepath):
             os.remove(ogg_filepath)
         if os.path.exists(wav_filepath):
