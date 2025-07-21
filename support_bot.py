@@ -2243,10 +2243,12 @@ async def send_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # support_bot.py
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks."""
     query = update.callback_query
-    if not query:
-        logger.error("No callback query received")
+    if query.data == 'new_request':
+        # Этот колбэк теперь обрабатывается в ConversationHandler,
+        # поэтому здесь мы его игнорируем, чтобы избежать конфликтов.
+        # Можно просто ответить на запрос, чтобы кнопка не "зависала".
+        await query.answer()
         return
     await query.answer()
     user_id = update.effective_user.id
@@ -3388,19 +3390,69 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # >>> КОНЕЦ КОДА ИЗ MULTIMEDIA_HANDLERS.PY <<<
 # support_bot.py (перед функцией main)
 
+# Добавьте эту новую функцию
+async def load_resident_data(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Загружает данные жителя из БД в context.user_data.
+    Возвращает True, если все данные загружены, иначе False.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT full_name, address, phone FROM residents WHERE chat_id = %s",
+                (user_id,)
+            )
+            resident_data = cur.fetchone()
+            if resident_data:
+                context.user_data['user_name'] = resident_data[0]
+                context.user_data['user_address'] = resident_data[1]
+                context.user_data['user_phone'] = resident_data[2]
+                logger.info(f"Данные для пользователя {user_id} успешно загружены.")
+                return True
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке данных для пользователя {user_id}: {e}")
+    finally:
+        if conn:
+            release_db_connection(conn)
+    
+    logger.warning(f"Данные для пользователя {user_id} не найдены в БД.")
+    return False
+
+# ЗАМЕНИТЕ СТАРУЮ new_request_start
 async def new_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начинает диалог создания новой заявки."""
+    """
+    Начинает диалог создания заявки, ПРЕДВАРИТЕЛЬНО проверив и загрузив данные пользователя.
+    """
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+
+    # Пытаемся загрузить данные из БД
+    data_loaded = await load_resident_data(user_id, context)
+
+    # Если данных нет, отправляем пользователя на регистрацию
+    if not data_loaded:
+        await query.edit_message_text(
+            "❗️ **Сначала нужно зарегистрироваться.**\n\n"
+            "Пожалуйста, вернитесь в главное меню и пройдите процесс регистрации, чтобы я знал ваши данные (ФИО, адрес, телефон).",
+            parse_mode='Markdown'
+        )
+        # Завершаем диалог, так как данных нет
+        return ConversationHandler.END
+
+    # Если данные есть, предлагаем выбор типа заявки
     keyboard = [
         [InlineKeyboardButton("✍️ Текстовое сообщение", callback_data='text_request')],
         [InlineKeyboardButton("🎤 Голосовое сообщение", callback_data='voice_request')],
-        [InlineKeyboardButton("🖼️ Фото", callback_data='photo_request')],
-        [InlineKeyboardButton("📹 Видео", callback_data='video_request')],
+        [InlineKeyboardButton("🖼️ Фото с описанием", callback_data='photo_request')],
+        [InlineKeyboardButton("📹 Видео с описанием", callback_data='video_request')],
         [InlineKeyboardButton("❌ Отмена", callback_data='cancel_request')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.callback_query.message.reply_text(
-        "Пожалуйста, выберите тип вашей заявки:",
+    await query.edit_message_text(
+        "Ваши данные загружены. Пожалуйста, выберите, как вы хотите описать проблему:",
         reply_markup=reply_markup
     )
     return CHOOSE_REQUEST_TYPE
@@ -3538,7 +3590,7 @@ def main() -> None:
                 entry_points=[CallbackQueryHandler(new_request_start, pattern='^new_request$')],
                 states={
                     CHOOSE_REQUEST_TYPE: [
-                        CallbackQueryHandler(choose_request_type, pattern='^(text_request|voice_request|photo_request|video_request)$')
+                        CallbackQueryHandler(choose_request_type, pattern='^(text|voice|photo|video)_request$')
                     ],
                     GET_TEXT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_text_request)],
                     CHOOSE_VOICE_LANGUAGE: [CallbackQueryHandler(choose_voice_language, pattern='^lang_(ru-RU|kk-KZ)$')],
@@ -3550,14 +3602,15 @@ def main() -> None:
             )
 
             # --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
+            # Стандартные команды
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
             
-            # Добавляем наш новый диалог
+            # СНАЧАЛА добавляем наш сложный диалог. Это важно для приоритета.
             application.add_handler(request_conv_handler)
             
-            # Этот обработчик кнопок нужен для всего, КРОМЕ кнопки "new_request"
+            # ПОТОМ добавляем общий обработчик для остальных кнопок.
             application.add_handler(CallbackQueryHandler(button_handler))
 
             # Этот обработчик будет ловить текстовые сообщения, если мы не находимся в диалоге
@@ -3576,11 +3629,16 @@ def main() -> None:
 
         except KeyboardInterrupt:
             logger.info("🛑 Bot stopped by user")
-            # ... (ваш код остановки)
+            stop_health_server()
+            global db_pool
+            if db_pool:
+                db_pool.closeall()
+                logger.info("Database connection pool closed")
             break
         except Exception as e:
             logger.error(f"⚠️ Bot crashed: {str(e)[:200]}")
-            # ... (ваш код перезапуска)
+            stop_health_server()
+            logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
 
 if __name__ == '__main__':
