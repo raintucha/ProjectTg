@@ -1288,31 +1288,39 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["resident"])
         )
 
-async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, problem_text: str):
+# ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
+async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, problem_text: str) -> int:
+    """
+    Сохраняет заявку в базу данных, используя переданный текст, и возвращает ее ID.
+    """
     chat_id = update.effective_user.id
     role = await get_user_role(chat_id)
     full_name = context.user_data.get("user_name", update.effective_user.full_name or "Unknown")
     address = context.user_data.get("user_address", "Админ" if role == SUPPORT_ROLES["admin"] else None)
     phone = context.user_data.get("user_phone", None)
-    problem_text = context.user_data.get("problem_text", problem_text)
+    
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    # Мы напрямую используем problem_text, переданный из голосового сообщения.
+    # Это исправляет ошибку, когда текст мог браться из старых данных.
+    current_problem_text = problem_text 
+    
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
-    is_urgent = context.user_data.get("is_urgent", any(keyword in problem_text.lower() for keyword in urgent_keywords))
+    is_urgent = context.user_data.get("is_urgent", any(keyword in current_problem_text.lower() for keyword in urgent_keywords))
     logger.info(f"Saving request for user {chat_id}: user_data={context.user_data}, is_urgent={is_urgent}")
 
-    # Validate required fields for non-admins
+    # (Далее весь ваш код валидации остается без изменений)
     if role != SUPPORT_ROLES["admin"]:
         required_fields = {
             "user_name": full_name,
             "user_address": address,
             "user_phone": phone,
-            "problem_text": problem_text
+            "problem_text": current_problem_text
         }
         missing_fields = [field for field, value in required_fields.items() if not value]
         if missing_fields:
             logger.error(f"Missing fields in save_request_to_db for user {chat_id}: {missing_fields}, user_data: {context.user_data}")
             raise ValueError(f"Отсутствуют данные: {', '.join(missing_fields)}")
         
-        # Validate field types
         type_errors = []
         if not isinstance(full_name, str):
             type_errors.append("user_name должен быть строкой")
@@ -1320,17 +1328,18 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             type_errors.append("user_address должен быть строкой")
         if not isinstance(phone, str):
             type_errors.append("user_phone должен быть строкой")
-        if not isinstance(problem_text, str):
+        if not isinstance(current_problem_text, str):
             type_errors.append("problem_text должен быть строкой")
         if type_errors:
             logger.error(f"Type errors in save_request_to_db for user {chat_id}: {type_errors}")
             raise ValueError(f"Ошибка в формате данных: {', '.join(type_errors)}")
 
     resident_id = None
+    issue_id = None # Определяем переменную заранее
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Register user in users table if missing
+            # (Весь ваш код регистрации пользователя и резидента остается без изменений)
             cur.execute("SELECT 1 FROM users WHERE user_id = %s", (chat_id,))
             if not cur.fetchone():
                 username = update.effective_user.username
@@ -1344,80 +1353,62 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
                 conn.commit()
                 logger.info(f"Auto-registered user {chat_id} in users table")
-
+            
             if role != SUPPORT_ROLES["admin"]:
-                # Check if resident exists
-                cur.execute(
-                    "SELECT resident_id FROM residents WHERE chat_id = %s",
-                    (chat_id,),
-                )
+                cur.execute("SELECT resident_id FROM residents WHERE chat_id = %s", (chat_id,))
                 resident = cur.fetchone()
                 if resident:
                     resident_id = resident[0]
-                    logger.info(f"Found existing resident_id: {resident_id} for chat_id: {chat_id}")
                 else:
-                    # Create new resident
                     cur.execute(
                         """
                         INSERT INTO residents (chat_id, full_name, address, phone, registration_date)
-                        VALUES (%s, %s, %s, %s, %s)
-                        RETURNING resident_id
+                        VALUES (%s, %s, %s, %s, %s) RETURNING resident_id
                         """,
                         (chat_id, full_name, address, phone, datetime.now()),
                     )
                     resident_id = cur.fetchone()[0]
                     conn.commit()
-                    logger.info(f"Created new resident_id: {resident_id} for chat_id: {chat_id}")
-
-            # Save the issue
+            
+            # (Ваш код сохранения заявки и логов остается почти без изменений)
             cur.execute(
                 """
                 INSERT INTO issues (resident_id, description, category, status, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING issue_id
+                VALUES (%s, %s, %s, %s, %s) RETURNING issue_id
                 """,
-                (
-                    resident_id,
-                    problem_text,
-                    "urgent" if is_urgent else "normal",
-                    "new",
-                    datetime.now(),
-                ),
+                (resident_id, current_problem_text, "urgent" if is_urgent else "normal", "new", datetime.now()),
             )
             issue_id = cur.fetchone()[0]
             conn.commit()
             logger.info(f"Saved issue #{issue_id} for chat_id: {chat_id}")
-
-            # Log the issue creation
+            
             cur.execute(
                 """
                 INSERT INTO issue_logs (issue_id, user_id, action, details, action_time)
                 VALUES (%s, %s, %s, %s, %s)
                 """,
-                (
-                    issue_id,
-                    chat_id,
-                    "created",
-                    f"Новая заявка от {full_name}: {problem_text}",
-                    datetime.now(),
-                ),
+                (issue_id, chat_id, "created", f"Новая заявка от {full_name}: {current_problem_text}", datetime.now()),
             )
             conn.commit()
             logger.info(f"Logged issue creation for issue ID {issue_id}")
 
-        return issue_id
+        # Вызываем отправку срочного уведомления, если нужно
+        if is_urgent:
+             context.user_data['problem_text'] = current_problem_text
+             await send_urgent_alert(update, context, issue_id)
+
+        return issue_id # Возвращаем номер заявки
 
     except psycopg2.Error as e:
         logger.error(f"Database error in save_request_to_db for user {chat_id}: {e}", exc_info=True)
-        conn.rollback()
+        if conn: conn.rollback()
         raise
     except Exception as e:
         logger.error(f"Unexpected error in save_request_to_db for user {chat_id}: {e}", exc_info=True)
-        conn.rollback()
+        if conn: conn.rollback()
         raise
     finally:
         if conn:
-            logger.info("Closing database connection")
             release_db_connection(conn)
 
 from datetime import datetime, timezone, timedelta  # Add this import
@@ -3319,17 +3310,18 @@ async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_
 if not os.path.exists("voice_messages"):
     os.makedirs("voice_messages")
 
+# И ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обрабатывает входящее голосовое сообщение, распознает речь и сразу сохраняет заявку.
+    Обрабатывает входящее голосовое сообщение, распознает речь и отправляет подтверждение.
     """
     ogg_filepath = ""
     wav_filepath = ""
     try:
+        # Проверяем, что пользователь начал процесс подачи заявки
         if not context.user_data.get("user_name"):
             await update.message.reply_text(
-                "Пожалуйста, сначала зарегистрируйтесь или начните процесс подачи заявки через меню, "
-                "чтобы я знал, кто вы. Нажмите /start"
+                "Пожалуйста, сначала начните процесс подачи заявки через меню, чтобы я знал ваши данные. Нажмите /start и выберите 'Подать заявку'."
             )
             return
 
@@ -3346,7 +3338,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_filepath) as source:
             audio_data = recognizer.record(source)
-            
             text_from_voice = ""
             try:
                 logger.info("Пытаюсь распознать речь на казахском языке...")
@@ -3361,15 +3352,31 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning("Не удалось распознать речь ни на одном из языков.")
                     await update.message.reply_text("К сожалению, я не смог разобрать речь. Попробуйте сказать четче или напишите, пожалуйста, текстом.")
                     return
+            
+            # Вызываем вашу функцию сохранения и получаем номер заявки
+            issue_id = await save_request_to_db(update, context, text_from_voice)
 
-            # ИЗМЕНЕНИЕ ЗДЕСЬ: Вызываем функцию сохранения напрямую
-            await save_request_to_db(update, context, text_from_voice)
+            # Отправляем подтверждение пользователю
+            await update.message.reply_text(
+                f"✅ **Ваша заявка #{issue_id} по голосовому сообщению принята!**\n\n"
+                f"**Текст заявки:**\n_{text_from_voice}_\n\n"
+                "Ожидайте, в ближайшее время с вами свяжется наш специалист.",
+                parse_mode='Markdown'
+            )
+            
+            # Сбрасываем состояние, чтобы можно было создать новую заявку
+            context.user_data.clear()
+            await main_menu(update, context)
 
+    except (ValueError, psycopg2.Error) as e:
+        # Ловим ошибки валидации или базы данных из save_request_to_db
+        logger.error(f"Ошибка при сохранении голосовой заявки: {e}")
+        await update.message.reply_text(f"Не удалось сохранить вашу заявку из-за ошибки: {e}\nПожалуйста, попробуйте еще раз.")
     except sr.RequestError as e:
         logger.error(f"Ошибка сервиса Google Speech Recognition; {e}")
         await update.message.reply_text("Произошла ошибка с сервисом распознавания речи.")
     except Exception as e:
-        logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при обработке голосового сообщения: {e}", exc_info=True)
         await update.message.reply_text("Произошла внутренняя ошибка при обработке вашего сообщения.")
     finally:
         if os.path.exists(ogg_filepath):
