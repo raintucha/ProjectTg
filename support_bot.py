@@ -2229,24 +2229,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     Обрабатывает ВСЕ кнопки, КРОМЕ тех, что запускают диалоги (например, 'new_request').
     """
     query = update.callback_query
-    
-    # Игнорируем new_request, так как он обрабатывается ConversationHandler
-    if query.data == 'new_request':
-        await query.answer()
-        return
-
     await query.answer()
+
     user_id = update.effective_user.id
     role = await get_user_role(user_id, context)
-    # ... (здесь идет остальная часть вашей функции button_handler без изменений)
-    # ... (elif query.data == "my_requests": и т.д.)
     user_type = context.user_data.get("user_type", "unknown")
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
     try:
-        # --- БЛОК ДЛЯ 'new_request' ПОЛНОСТЬЮ УДАЛЕН, КОНФЛИКТА БОЛЬШЕ НЕТ ---
+        page_key = f"active_requests_page_{user_id}"
 
-        if query.data == "do_nothing":
+        if query.data == "req_prev":
+            page = context.user_data.get(page_key, 0)
+            if page > 0:
+                context.user_data[page_key] = page - 1
+            await show_active_requests(update, context)
+            return
+            
+        elif query.data == "req_next":
+            page = context.user_data.get(page_key, 0)
+            context.user_data[page_key] = page + 1
+            await show_active_requests(update, context)
+            return
+
+        elif query.data == "do_nothing":
             return
         elif query.data == "start":
             await start(update, context)
@@ -2318,16 +2324,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"User {user_id} pressed 'help' button")
             await show_help(update, context)
         elif query.data == "active_requests":
-            context.user_data['active_requests_page'] = 0
-            await show_active_requests(update, context)
-        elif query.data == "req_prev":
-            page = context.user_data.get('active_requests_page', 0)
-            if page > 0:
-                context.user_data['active_requests_page'] = page - 1
-            await show_active_requests(update, context)
-        elif query.data == "req_next":
-            page = context.user_data.get('active_requests_page', 0)
-            context.user_data['active_requests_page'] = page + 1
+            context.user_data[page_key] = 0
             await show_active_requests(update, context)
         elif query.data == "urgent_requests":
             await show_urgent_requests(update, context)
@@ -2371,14 +2368,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             issue_id = int(query.data.split("_")[2])
             await complete_request(update, context, issue_id)
         elif query.data.startswith("message_user_"):
-            user_id = int(query.data.split("_")[2])
-            await message_user(update, context, user_id)
+            user_id_to_message = int(query.data.split("_")[2])
+            await message_user(update, context, user_id_to_message)
         elif query.data.startswith("agent_info_"):
-            user_id = int(query.data.split("_")[2])
-            await show_agent_info(update, context, user_id)
+            agent_id = int(query.data.split("_")[2])
+            await show_agent_info(update, context, agent_id)
         elif query.data.startswith("delete_agent_"):
-            user_id = int(query.data.split("_")[2])
-            await delete_agent(update, context, user_id)
+            agent_id_to_delete = int(query.data.split("_")[2])
+            await delete_agent(update, context, agent_id_to_delete)
         elif query.data == "req_refresh":
             await show_active_requests(update, context)
         elif query.data == "add_agent":
