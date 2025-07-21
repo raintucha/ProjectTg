@@ -25,7 +25,9 @@ from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 from telegram.error import NetworkError, TimedOut
-
+from telegram.ext import MessageHandler, filters
+import speech_recognition as sr
+from pydub import AudioSegment
 # Явно укажем, что это веб-сервис
 WEB_SERVICE = True
 PORT = int(os.getenv("PORT", 8080))
@@ -1423,32 +1425,70 @@ from datetime import datetime, timezone, timedelta  # Add this import
 APP_TIMEZONE = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", 5))))
 
 async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int):
+    """
+    Отправляет срочное уведомление о новой заявке всем администраторам.
+    """
     if not context.bot:
-        logger.error("Bot instance not initialized")
+        logger.error("Экземпляр бота не инициализирован.")
         return
+
     try:
+        # --- 1. Получение списка администраторов из базы данных ---
+        conn = None
+        admin_chat_ids = []
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                # Предполагается, что в столбце 'user_id' хранится chat_id пользователя
+                cur.execute("SELECT user_id FROM users WHERE role = %s", (SUPPORT_ROLES["admin"],))
+                admins = cur.fetchall()
+                admin_chat_ids = [row[0] for row in admins]
+        except psycopg2.Error as e:
+            logger.error(f"Ошибка базы данных при получении администраторов: {e}", exc_info=True)
+            return  # Выходим, если не можем получить список администраторов
+        finally:
+            if conn:
+                release_db_connection(conn)
+
+        if not admin_chat_ids:
+            logger.warning("В базе данных не найдены администраторы для отправки срочного уведомления.")
+            return
+
+        # --- 2. Формирование текста сообщения ---
         user = update.effective_user
-        full_name = context.user_data.get("user_name", user.full_name or "Unknown")
+        full_name = context.user_data.get("user_name", user.full_name or "Неизвестный")
         phone = context.user_data.get("user_phone", "Не указан")
         address = context.user_data.get("user_address", "Не указан")
         problem_text = context.user_data.get("problem_text", "Не указана")
+        # Установка часового пояса +5
         timestamp = datetime.now(timezone(timedelta(hours=5))).strftime("%H:%M %d.%m.%Y")
-        message = (
+
+        message_text = (
             f"🚨 СРОЧНОЕ ОБРАЩЕНИЕ #{issue_id} 🚨\n\n"
             f"От: {full_name} (@{user.username or 'нет'})\n"
-            f"ID: {user.id}\n"
+            f"ID пользователя: {user.id}\n"
             f"Адрес: {address}\n"
             f"Телефон: {phone}\n"
             f"Проблема: {problem_text}\n"
             f"Время: {timestamp}"
         )
-        await context.bot.send_message(
-            chat_id=DIRECTOR_CHAT_ID,
-            text=message,
-        )
-        logger.info(f"Sent urgent alert to director for issue #{issue_id}")
+
+        # --- 3. Отправка сообщения каждому администратору ---
+        for chat_id in admin_chat_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=message_text,
+                )
+                logger.info(f"Срочное уведомление по заявке #{issue_id} отправлено администратору {chat_id}")
+            except Exception as e:
+                # Логируем ошибку для конкретного администратора, но продолжаем отправку остальным
+                logger.error(f"Не удалось отправить срочное уведомление администратору {chat_id}: {e}", exc_info=True)
+
     except Exception as e:
-        logger.error(f"Error sending urgent alert for issue #{issue_id}: {e}", exc_info=True)
+        # Отлавливаем любые другие непредвиденные ошибки в функции
+        logger.error(f"Критическая ошибка в send_urgent_alert для заявки #{issue_id}: {e}", exc_info=True)
+
 
 async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_name") or not context.user_data.get("registration_flow"):
@@ -3275,6 +3315,90 @@ async def generate_report_command(update: Update, context: ContextTypes.DEFAULT_
         InlineKeyboardMarkup(keyboard),
     )
 
+# Создаем папку для временного хранения аудио, если ее нет
+if not os.path.exists("voice_messages"):
+    os.makedirs("voice_messages")
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает входящее голосовое сообщение.
+    Пытается распознать речь сначала на казахском, затем на русском языке.
+    """
+    ogg_filepath = ""
+    wav_filepath = ""
+    try:
+        if not context.user_data.get("user_name"):
+            await update.message.reply_text(
+                "Пожалуйста, сначала зарегистрируйтесь или начните процесс подачи заявки через меню, "
+                "чтобы я знал, кто вы. Нажмите /start"
+            )
+            return
+
+        voice = update.message.voice
+        voice_file = await voice.get_file()
+
+        ogg_filepath = os.path.join("voice_messages", f"{voice.file_id}.ogg")
+        wav_filepath = os.path.join("voice_messages", f"{voice.file_id}.wav")
+
+        await voice_file.download_to_drive(ogg_filepath)
+        audio = AudioSegment.from_ogg(ogg_filepath)
+        audio.export(wav_filepath, format="wav")
+
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_filepath) as source:
+            audio_data = recognizer.record(source)
+            
+            text_from_voice = ""
+            try:
+                # 1. Первая попытка: распознать на казахском языке
+                logger.info("Пытаюсь распознать речь на казахском языке...")
+                text_from_voice = recognizer.recognize_google(audio_data, language="kk-KZ")
+                logger.info(f"Распознано на казахском: '{text_from_voice}'")
+
+            except sr.UnknownValueError:
+                # 2. Вторая попытка: если на казахском не вышло, пробую на русском
+                logger.info("На казахском не распознано. Пытаюсь распознать на русском...")
+                try:
+                    text_from_voice = recognizer.recognize_google(audio_data, language="ru-RU")
+                    logger.info(f"Распознано на русском: '{text_from_voice}'")
+                except sr.UnknownValueError:
+                    logger.warning("Не удалось распознать речь ни на одном из языков.")
+                    await update.message.reply_text("К сожалению, я не смог разобрать речь. Попробуйте сказать четче или напишите, пожалуйста, текстом.")
+                    return # Выходим, так как речь не распознана
+
+            # Если текст был успешно распознан на одном из языков
+            original_text = update.message.text
+            update.message.text = text_from_voice
+            
+            await process_problem_report(update, context)
+            
+            update.message.text = original_text
+
+    except sr.RequestError as e:
+        logger.error(f"Ошибка сервиса Google Speech Recognition; {e}")
+        await update.message.reply_text("Произошла ошибка с сервисом распознавания речи.")
+    except Exception as e:
+        logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)
+        await update.message.reply_text("Произошла внутренняя ошибка при обработке вашего сообщения.")
+    finally:
+        # Удаляем временные файлы
+        if os.path.exists(ogg_filepath):
+            os.remove(ogg_filepath)
+        if os.path.exists(wav_filepath):
+            os.remove(wav_filepath)
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик для фотографий (пока заглушка).
+    """
+    await update.message.reply_text(
+        "Спасибо, я получил ваше фото. В данный момент я не умею анализировать изображения, "
+        "но вы можете добавить текстовое описание к нему, чтобы я создал заявку."
+    )
+    logger.info(f"Получено фото от пользователя {update.effective_user.id}")
+
+# >>> КОНЕЦ КОДА ИЗ MULTIMEDIA_HANDLERS.PY <<<
+
 # Remove the standalone application.add_handler line
 # Update the main() function (near the end of the file) as follows:
 def main() -> None:
@@ -3282,12 +3406,10 @@ def main() -> None:
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN is not set")
         raise ValueError("TELEGRAM_TOKEN environment variable is missing")
-    
+
     try:
-        # Test token validity
-        import telegram
         bot = telegram.Bot(token=TELEGRAM_TOKEN)
-        bot.get_me()  # This will raise an error if the token is invalid
+        bot.get_me()
         logger.info("Telegram token validated successfully")
     except telegram.error.InvalidToken:
         logger.error("Invalid TELEGRAM_TOKEN")
@@ -3304,17 +3426,26 @@ def main() -> None:
             health_server_thread = start_health_server()
             logger.info("🔄 Initializing bot...")
             application = (
-                 Application.builder()
+                Application.builder()
                 .token(TELEGRAM_TOKEN)
-                .job_queue(JobQueue())  # <--- ДОБАВЬТЕ ЭТУ СТРОКУ
+                .job_queue(JobQueue())
                 .build()
             )
 
-            # Add handlers
+            # --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
             application.add_handler(CallbackQueryHandler(button_handler))
+
+            # --- ВОТ ИЗМЕНЕНИЯ ---
+            # 1. Добавляем обработчик для голосовых сообщений
+            application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+            # 2. Добавляем обработчик для фото
+            application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+            # ---------------------
+
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data, block=False))
             application.add_error_handler(error_handler)
 
@@ -3344,8 +3475,8 @@ def main() -> None:
             stop_health_server()
             logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
-            
+
 if __name__ == '__main__':
     logger.info("🛠 Starting application...")
-    time.sleep(8)
+    time.sleep(8) # Даем время на запуск зависимых сервисов, например, БД
     main()
