@@ -2243,20 +2243,20 @@ async def send_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # support_bot.py
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает ВСЕ кнопки, КРОМЕ тех, что запускают диалоги (например, 'new_request').
+    """
     query = update.callback_query
-    if query.data == 'new_request':
-        # Этот колбэк теперь обрабатывается в ConversationHandler,
-        # поэтому здесь мы его игнорируем, чтобы избежать конфликтов.
-        # Можно просто ответить на запрос, чтобы кнопка не "зависала".
-        await query.answer()
-        return
     await query.answer()
+    
     user_id = update.effective_user.id
-    role = await get_user_role(user_id, context)  # Pass context for caching
+    role = await get_user_role(user_id, context)
     user_type = context.user_data.get("user_type", "unknown")
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
     try:
+        # --- БЛОК ДЛЯ 'new_request' ПОЛНОСТЬЮ УДАЛЕН, КОНФЛИКТА БОЛЬШЕ НЕТ ---
+
         if query.data == "do_nothing":
             return
         elif query.data == "start":
@@ -2322,8 +2322,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await add_resident(update, context)
         elif query.data == "delete_resident":
             await delete_resident(update, context)
-        elif query.data == "new_request":
-            await process_new_request(update, context)
         elif query.data == "my_requests":
             logger.info(f"User {user_id} pressed 'my_requests' button")
             await show_user_requests(update, context)
@@ -2405,7 +2403,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 welcome_text = "👑 Административное меню:"
             elif saved_role == SUPPORT_ROLES["agent"]:
                 welcome_text = "👷 Панель сотрудника:"
-            elif saved_role == SUPPORT_ROLES["user"] and saved_user_type == USER_TYPES["resident"]:  # Исправлено
+            elif saved_role == SUPPORT_ROLES["user"] and saved_user_type == USER_TYPES["resident"]:
                 welcome_text = "🏠 Главное меню:"
             else:
                 welcome_text = "🏠 Главное меню:"
@@ -2422,7 +2420,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 welcome_text = "👑 Административное меню:"
             elif current_role == SUPPORT_ROLES["agent"]:
                 welcome_text = "👷 Панель сотрудника:"
-            elif current_role == SUPPORT_ROLES["user"] and current_user_type == USER_TYPES["resident"]:  # Исправлено
+            elif current_role == SUPPORT_ROLES["user"] and current_user_type == USER_TYPES["resident"]:
                 welcome_text = "🏠 Главное меню:"
             else:
                 welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
@@ -3558,7 +3556,7 @@ async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # Update the main() function (near the end of the file) as follows:
 # ПОЛНОСТЬЮ ЗАМЕНИТЕ ВАШУ ФУНКЦИЮ main
 def main() -> None:
-    """Run the bot with auto-restart."""
+    """Запускает бота с автоматическим перезапуском."""
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN is not set")
         raise ValueError("TELEGRAM_TOKEN environment variable is missing")
@@ -3585,7 +3583,7 @@ def main() -> None:
                 .build()
             )
 
-            # --- НОВЫЙ ОБРАБОТЧИК ДЛЯ СОЗДАНИЯ ЗАЯВОК ---
+            # --- ОБРАБОТЧИК ДИАЛОГА СОЗДАНИЯ ЗАЯВКИ ---
             request_conv_handler = ConversationHandler(
                 entry_points=[CallbackQueryHandler(new_request_start, pattern='^new_request$')],
                 states={
@@ -3601,23 +3599,26 @@ def main() -> None:
                 fallbacks=[CallbackQueryHandler(cancel_request, pattern='^cancel_request$')],
             )
 
-            # --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
-            # Стандартные команды
+            # --- РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ---
+            
+            # 1. Стандартные команды
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
             
-            # СНАЧАЛА добавляем наш сложный диалог. Это важно для приоритета.
+            # 2. Наш сложный диалог (имеет приоритет для кнопки 'new_request')
             application.add_handler(request_conv_handler)
             
-            # ПОТОМ добавляем общий обработчик для остальных кнопок.
+            # 3. Общий обработчик для ВСЕХ ОСТАЛЬНЫХ кнопок
             application.add_handler(CallbackQueryHandler(button_handler))
 
-            # Этот обработчик будет ловить текстовые сообщения, если мы не находимся в диалоге
+            # 4. Обработчик для текстовых сообщений вне диалогов
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_data, block=False))
+            
+            # 5. Обработчик ошибок
             application.add_error_handler(error_handler)
 
-            # Планировщик задач
+            # 6. Планировщик задач
             application.job_queue.run_repeating(
                 send_overdue_notifications,
                 interval=6*60*60,
