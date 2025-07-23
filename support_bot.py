@@ -1188,7 +1188,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         if conn:
             release_db_connection(conn)
-            
+
 async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process problem description and ensure user_type is updated to resident."""
     if not context.user_data.get("awaiting_problem"):
@@ -3699,10 +3699,11 @@ def main() -> None:
             application.add_handler(CommandHandler("report", generate_report_command))
             application.add_handler(CommandHandler("clear", clear_chat))
             
-            # 2. Наш сложный диалог (имеет приоритет для кнопки 'new_request')
+            ### ИЗМЕНЕНИЕ ЗДЕСЬ: ПРАВИЛЬНЫЙ ПОРЯДОК ###
+            # 2. СНАЧАЛА добавляем сложный диалог для кнопки 'new_request'
             application.add_handler(request_conv_handler)
             
-            # 3. Общий обработчик для ВСЕХ ОСТАЛЬНЫХ кнопок
+            # 3. ТОЛЬКО ПОТОМ добавляем общий обработчик для ВСЕХ ОСТАЛЬНЫХ кнопок
             application.add_handler(CallbackQueryHandler(button_handler))
 
             # 4. Обработчик для текстовых сообщений вне диалогов
@@ -3734,7 +3735,7 @@ def main() -> None:
             stop_health_server()
             logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
-
+            
 if __name__ == '__main__':
     logger.info("🛠 Starting application...")
     time.sleep(8) # Даем время на запуск зависимых сервисов, например, БД
