@@ -1409,68 +1409,92 @@ APP_TIMEZONE = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", 5))))
 
 async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, issue_id: int):
     """
-    Отправляет срочное уведомление о новой заявке всем администраторам.
+    Отправляет срочное уведомление о новой заявке всем администраторам и агентам поддержки.
     """
     if not context.bot:
         logger.error("Экземпляр бота не инициализирован.")
         return
 
     try:
-        # --- 1. Получение списка администраторов из базы данных ---
+        # --- 1. Получение списка администраторов и агентов из базы данных ---
         conn = None
-        admin_chat_ids = []
+        recipients = []
         try:
             conn = get_db_connection()
             with conn.cursor() as cur:
-                # Предполагается, что в столбце 'user_id' хранится chat_id пользователя
-                cur.execute("SELECT user_id FROM users WHERE role = %s", (SUPPORT_ROLES["admin"],))
-                admins = cur.fetchall()
-                admin_chat_ids = [row[0] for row in admins]
+                # Ищем всех с ролью admin (3) или agent (2)
+                cur.execute("""
+                    SELECT user_id FROM users 
+                    WHERE role IN (%s, %s)
+                    """, 
+                    (SUPPORT_ROLES["admin"], SUPPORT_ROLES["agent"]))
+                recipients = [row[0] for row in cur.fetchall()]
+                
+                # Добавляем директора, если он не в списке
+                if DIRECTOR_CHAT_ID and DIRECTOR_CHAT_ID not in recipients:
+                    recipients.append(DIRECTOR_CHAT_ID)
+                    
         except psycopg2.Error as e:
-            logger.error(f"Ошибка базы данных при получении администраторов: {e}", exc_info=True)
-            return  # Выходим, если не можем получить список администраторов
+            logger.error(f"Ошибка базы данных при получении получателей: {e}", exc_info=True)
+            return
         finally:
             if conn:
                 release_db_connection(conn)
 
-        if not admin_chat_ids:
-            logger.warning("В базе данных не найдены администраторы для отправки срочного уведомления.")
+        if not recipients:
+            logger.warning("Не найдены администраторы или агенты для уведомления")
             return
 
-        # --- 2. Формирование текста сообщения ---
+        # --- 2. Формирование текста сообщения с улучшенным форматированием ---
         user = update.effective_user
         full_name = context.user_data.get("user_name", user.full_name or "Неизвестный")
         phone = context.user_data.get("user_phone", "Не указан")
         address = context.user_data.get("user_address", "Не указан")
         problem_text = context.user_data.get("problem_text", "Не указана")
-        # Установка часового пояса +5
         timestamp = datetime.now(timezone(timedelta(hours=5))).strftime("%H:%M %d.%m.%Y")
 
         message_text = (
-            f"🚨 СРОЧНОЕ ОБРАЩЕНИЕ #{issue_id} 🚨\n\n"
-            f"От: {full_name} (@{user.username or 'нет'})\n"
-            f"ID пользователя: {user.id}\n"
-            f"Адрес: {address}\n"
-            f"Телефон: {phone}\n"
-            f"Проблема: {problem_text}\n"
-            f"Время: {timestamp}"
+            f"🚨 *СРОЧНОЕ ОБРАЩЕНИЕ* #{issue_id}\n\n"
+            f"*От:* {full_name} (@{user.username or 'нет'})\n"
+            f"*ID:* {user.id}\n"
+            f"*Адрес:* {address}\n"
+            f"*Телефон:* `{phone}`\n"
+            f"*Время:* {timestamp}\n\n"
+            f"*Проблема:*\n{problem_text[:300]}{'...' if len(problem_text) > 300 else ''}"
         )
 
-        # --- 3. Отправка сообщения каждому администратору ---
-        for chat_id in admin_chat_ids:
+        # --- 3. Отправка сообщения с кнопками быстрого действия ---
+        for chat_id in recipients:
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=message_text,
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🔍 Подробнее", callback_data=f"request_detail_{issue_id}"),
+                            InlineKeyboardButton("📨 Ответить", callback_data=f"message_user_{user.id}")
+                        ],
+                        [
+                            InlineKeyboardButton("✅ Взять в работу", callback_data=f"assign_request_{issue_id}")
+                        ]
+                    ])
                 )
-                logger.info(f"Срочное уведомление по заявке #{issue_id} отправлено администратору {chat_id}")
+                logger.info(f"Срочное уведомление отправлено {chat_id}")
+                
+                # Небольшая задержка между отправками, чтобы избежать лимитов
+                await asyncio.sleep(0.3)
+                
+            except telegram.error.BadRequest as e:
+                if "chat not found" in str(e).lower():
+                    logger.warning(f"Чат {chat_id} не найден (возможно, пользователь заблокировал бота)")
+                else:
+                    logger.error(f"Ошибка отправки уведомления {chat_id}: {e}")
             except Exception as e:
-                # Логируем ошибку для конкретного администратора, но продолжаем отправку остальным
-                logger.error(f"Не удалось отправить срочное уведомление администратору {chat_id}: {e}", exc_info=True)
+                logger.error(f"Не удалось отправить уведомление {chat_id}: {e}")
 
     except Exception as e:
-        # Отлавливаем любые другие непредвиденные ошибки в функции
-        logger.error(f"Критическая ошибка в send_urgent_alert для заявки #{issue_id}: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка в send_urgent_alert: {e}", exc_info=True)
 
 
 async def process_user_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
