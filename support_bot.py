@@ -725,61 +725,51 @@ async def set_user_role(update: Update, context: ContextTypes.DEFAULT_TYPE, new_
         context.user_data.pop("awaiting_role_selection", None)
         release_db_connection(conn)
 
-def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, user_type: str = None) -> InlineKeyboardMarkup:
+def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, user_type: str = None, counts: dict = None) -> InlineKeyboardMarkup:
     """Generate the main menu keyboard based on user role and user_type."""
     keyboard = []
 
-    # Fetch user_type from database if not provided (only if user exists)
-    if user_type is None and role is not None:
-        conn = None
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_type FROM users WHERE user_id = %s", (user_id,))
-                result = cur.fetchone()
-                user_type = result[0] if result else None
-        except psycopg2.Error as e:
-            logger.error(f"Database error fetching user_type for {user_id}: {e}", exc_info=True)
-            user_type = None
-        finally:
-            if conn:
-                release_db_connection(conn)
-
-    # New/unregistered users (no role or user_type)
-    if role is None or (role == SUPPORT_ROLES["user"] and user_type is None):
+    # New/unregistered users
+    if role == SUPPORT_ROLES["user"] and not user_type:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Зарегистрироваться как резидент", callback_data="register_as_resident")],
-            [InlineKeyboardButton("🛒 Зарегистрироваться как покупатель", callback_data="select_potential_buyer")]
+            [InlineKeyboardButton("🏠 Я здесь живу", callback_data="register_as_resident")],
+            [InlineKeyboardButton("🛒 Хочу купить квартиру", callback_data="select_potential_buyer")]
         ])
 
-    # Admin menu (priority over user_type)
+    ### ИЗМЕНЕНИЯ ЗДЕСЬ: Обновленные меню с иконками и счетчиками ###
+    
+    # Admin menu
     if role == SUPPORT_ROLES["admin"]:
+        active_count = f" ({counts['active']})" if counts and counts.get('active', 0) > 0 else ""
+        urgent_count = f" ({counts['urgent']})" if counts and counts.get('urgent', 0) > 0 else ""
         keyboard = [
-            [InlineKeyboardButton("📝 Добавить резидента", callback_data="add_resident")],
-            [InlineKeyboardButton("🗑 Удалить резидента", callback_data="delete_resident")],
-            [InlineKeyboardButton("👷 Управление сотрудниками", callback_data="manage_agents")],
-            [InlineKeyboardButton("📊 Отчеты", callback_data="reports_menu")],
-            [InlineKeyboardButton("🔔 Активные заявки", callback_data="active_requests")],
-            [InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")],
+            [InlineKeyboardButton(f"🔔 Новые заявки{active_count}", callback_data="active_requests")],
+            [InlineKeyboardButton(f"🚨 Срочные заявки{urgent_count}", callback_data="urgent_requests")],
             [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
-            [InlineKeyboardButton("🛑 Остановить бота", callback_data="shutdown_bot")]
+            [InlineKeyboardButton("👥 Управление персоналом", callback_data="manage_agents")],
+            [InlineKeyboardButton("📊 Статистика и отчеты", callback_data="reports_menu")],
+            [InlineKeyboardButton("📝 Добавить жителя", callback_data="add_resident")],
+            [InlineKeyboardButton("🗑 Удалить жителя", callback_data="delete_resident")],
         ]
     
     # Agent menu
     elif role == SUPPORT_ROLES["agent"]:
+        active_count = f" ({counts['active']})" if counts and counts.get('active', 0) > 0 else ""
+        urgent_count = f" ({counts['urgent']})" if counts and counts.get('urgent', 0) > 0 else ""
         keyboard = [
-            [InlineKeyboardButton("🔔 Активные заявки", callback_data="active_requests")],
-            [InlineKeyboardButton("🚨 Срочные заявки", callback_data="urgent_requests")],
+            [InlineKeyboardButton(f"🔔 Новые заявки{active_count}", callback_data="active_requests")],
+            [InlineKeyboardButton(f"🚨 Срочные заявки{urgent_count}", callback_data="urgent_requests")],
             [InlineKeyboardButton("✅ Завершенные заявки", callback_data="completed_requests")],
-            [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
+            [InlineKeyboardButton("❓ Помощь и контакты", callback_data="help")]
         ]
     
-    # Resident menu (checked by user_type)
+    # Resident menu
     elif user_type == USER_TYPES["resident"]:
         keyboard = [
-            [InlineKeyboardButton("📝 Новая заявка", callback_data="new_request")],
-            [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
-            [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
+            [InlineKeyboardButton("✍️ Создать заявку", callback_data="new_request")],
+            [InlineKeyboardButton("📂 Мои заявки", callback_data="my_requests")],
+            [InlineKeyboardButton("📢 Новости комплекса", url=NEWS_CHANNEL)],
+            [InlineKeyboardButton("❓ Помощь и контакты", callback_data="help")]
         ]
     
     # Potential buyer menu
@@ -791,9 +781,8 @@ def main_menu_keyboard(user_id: int, role: int, is_in_main_menu: bool = False, u
             [InlineKeyboardButton("❓ Задать вопрос", callback_data="ask_sales_question")]
         ]
 
-    # Add back button if not in main menu and keyboard exists
     if not is_in_main_menu and keyboard:
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад в главное меню", callback_data="back_to_main")])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -806,7 +795,7 @@ async def get_user_type(user_id: int) -> str:
         with conn.cursor() as cur:
             cur.execute("SELECT user_type FROM users WHERE user_id = %s", (user_id,))
             result = cur.fetchone()
-            if result:
+            if result and result[0]:
                 user_type = result[0]
     except psycopg2.Error as e:
         logger.error(f"Database error in get_user_type for {user_id}: {e}")
@@ -868,15 +857,30 @@ def save_resident_to_db(user_id: int, data: dict):
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет пользователю главное меню в зависимости от его роли."""
-    message = update.message or update.callback_query.message
     chat_id = update.effective_user.id
     
     role = await get_user_role(chat_id)
     user_type = await get_user_type(chat_id)
     
-    # Сохраняем актуальные данные в контекст
     context.user_data["role"] = role
     context.user_data["user_type"] = user_type
+
+    ### ИЗМЕНЕНИЯ ЗДЕСЬ: Логика для счетчиков ###
+    counts = {'active': 0, 'urgent': 0}
+    if role in [SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]]:
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM issues WHERE status = 'new'")
+                counts['active'] = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM issues WHERE status = 'new' AND category = 'urgent'")
+                counts['urgent'] = cur.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Failed to get request counts for main menu: {e}")
+        finally:
+            if conn:
+                release_db_connection(conn)
 
     text = "🏠 Главное меню:"
     
@@ -884,7 +888,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update,
         context,
         text,
-        main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+        main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type, counts=counts)
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -892,54 +896,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_user.id
     logger.info(f"User {chat_id} started bot.")
 
-    # Полностью очищаем состояние пользователя при каждой команде /start
     context.user_data.clear()
 
     role = await get_user_role(chat_id)
-    user_type = await get_user_type(chat_id) # Используем новую вспомогательную функцию
+    user_type = await get_user_type(chat_id)
     context.user_data["user_type"] = user_type
-
     logger.info(f"User {chat_id} has role: {role} and user_type: {user_type}")
 
-    # Генерируем соответствующее меню
-    if role == SUPPORT_ROLES["agent"]:
-        # Меню для агента не изменилось
-        keyboard = [
-            [InlineKeyboardButton("👷 Я сотрудник", callback_data="select_agent")],
-            [InlineKeyboardButton("ℹ️ О комплексе", callback_data="complex_info")],
-        ]
+    ### ИЗМЕНЕНИЯ ЗДЕСЬ: Логика для счетчиков и улучшенных меню ###
+    counts = {'active': 0, 'urgent': 0}
+    if role in [SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]]:
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM issues WHERE status = 'new'")
+                counts['active'] = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM issues WHERE status = 'new' AND category = 'urgent'")
+                counts['urgent'] = cur.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Failed to get request counts for start menu: {e}")
+        finally:
+            if conn:
+                release_db_connection(conn)
+
+    if user_type == USER_TYPES["resident"]:
         await send_and_remember(
             update,
             context,
-            "👷 Добро пожаловать! Вы зарегистрированы как сотрудник. Нажмите 'Я сотрудник', чтобы перейти в панель сотрудника.",
-            InlineKeyboardMarkup(keyboard)
+            "🏠 Добро пожаловать! Я ваш помощник в ЖК «Сункар».",
+            main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
         )
     elif role == SUPPORT_ROLES["admin"]:
-        # Меню для админа не изменилось
         await send_and_remember(
             update,
             context,
-            "👑 Административное меню:",
-            main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+            "👑 Меню администратора:",
+            main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type, counts=counts)
         )
-    elif user_type == USER_TYPES["resident"]:
-         # Меню для резидента не изменилось
+    elif role == SUPPORT_ROLES["agent"]:
         await send_and_remember(
             update,
             context,
-            "🏠 Добро пожаловать, резидент!",
-            main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type)
+            "👷 Панель сотрудника:",
+             main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type, counts=counts)
         )
     else:
-        # ИСПРАВЛЕНО: Меню для нового пользователя
+        # Улучшенное меню для нового пользователя
         keyboard = [
-            [InlineKeyboardButton("🏠 Я резидент (Регистрация)", callback_data="register_as_resident")],
-            [InlineKeyboardButton("🛒 Я потенциальный покупатель", callback_data="select_potential_buyer")]
+            [InlineKeyboardButton("🏠 Я здесь живу", callback_data="register_as_resident")],
+            [InlineKeyboardButton("🛒 Хочу купить квартиру", callback_data="select_potential_buyer")]
         ]
+        text = (
+            "👋 Здравствуйте! Я — ваш личный помощник в ЖК «Сункар».\n\n"
+            "Чтобы я мог вам помочь, пожалуйста, выберите, кто вы:"
+        )
         await send_and_remember(
             update,
             context,
-            "👋 Добро пожаловать в Sunqar Support Bot!\n\nПожалуйста, укажите, кто вы, чтобы продолжить:",
+            text,
             InlineKeyboardMarkup(keyboard)
         )
 
@@ -1075,23 +1090,38 @@ async def process_new_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display help information."""
-    logger.info(f"Showing help for user {update.effective_user.id}")
+    user_id = update.effective_user.id
+    logger.info(f"Showing help for user {user_id}")
+    
+    # Улучшенный текст помощи
+    help_text = (
+        "ℹ️ **Помощь и контакты**\n\n"
+        "Если у вас возникли трудности, вот что можно сделать:\n\n"
+        "• **Не получается создать заявку?**\n"
+        "Убедитесь, что вы зарегистрированы как житель. Если нет, вернитесь в главное меню и пройдите регистрацию.\n\n"
+        "• **Срочная проблема (потоп, пожар)?**\n"
+        "При создании заявки обязательно напишите слово «срочно», и мы отреагируем немедленно.\n\n"
+        "• **Техническая поддержка бота:**\n"
+        "Если бот не работает или вы заметили ошибку, напишите @ShiroOni99.\n\n"
+        "📞 **Контакты Управляющей Компании:**\n"
+        "Телефон: `+7 (777) 123-45-67`\n"
+        "Часы работы: Пн-Пт, с 9:00 до 18:00"
+    )
+    
     try:
         await send_and_remember(
             update,
             context,
-            f"ℹ️ Справка:\n\n• Для срочных проблем используйте слов: 'срочно'\n"
-            f"• Новости ЖК: {NEWS_CHANNEL}\n• Техподдержка: @ShiroOni99",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            help_text,
+            main_menu_keyboard(user_id, await get_user_role(user_id), user_type=context.user_data.get("user_type")),
         )
-        logger.info(f"Help message sent to user {update.effective_user.id}")
     except Exception as e:
-        logger.error(f"Error in show_help for user {update.effective_user.id}: {e}", exc_info=True)
+        logger.error(f"Error in show_help for user {user_id}: {e}", exc_info=True)
         await send_and_remember(
             update,
             context,
-            "❌ Ошибка при отображении справки. Попробуйте позже.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            "❌ Ошибка при отображении справки.",
+            main_menu_keyboard(user_id, await get_user_role(user_id)),
         )
 
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1196,7 +1226,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
             context,
             "❌ Ошибка: не ожидается ввод проблемы.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=context.user_data.get("user_type"))
-        )   
+        )
         return
 
     problem_text = update.message.text.strip()
@@ -1210,17 +1240,15 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    # Store problem and determine urgency
     context.user_data["problem_text"] = problem_text
     urgent_keywords = ["потоп", "затоп", "пожар", "авария", "срочно", "опасно", "чрезвычайно", "экстренно", "критически", "немедленно", "угроза"]
-    context.user_data["is_urgent"] = any(keyword in problem_text.lower() for keyword in urgent_keywords)
+    is_urgent = any(keyword in problem_text.lower() for keyword in urgent_keywords)
+    context.user_data["is_urgent"] = is_urgent
     context.user_data.pop("awaiting_problem", None)
-    logger.info(f"Received problem: {problem_text} for chat_id: {update.effective_user.id}, is_urgent: {context.user_data['is_urgent']}")
+    logger.info(f"Received problem: {problem_text} for chat_id: {update.effective_user.id}, is_urgent: {is_urgent}")
 
-    # Set user_type to resident since they're submitting a request
     context.user_data["user_type"] = USER_TYPES["resident"]
 
-    # Validate required fields
     required_fields = ["user_name", "user_address", "user_phone", "problem_text"]
     missing_fields = [field for field in required_fields if field not in context.user_data or not context.user_data[field]]
     if missing_fields:
@@ -1235,20 +1263,27 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         issue_id = await save_request_to_db(update, context, problem_text)
-        if context.user_data["is_urgent"]:
+        if is_urgent:
             try:
                 await send_urgent_alert(update, context, issue_id)
             except Exception as e:
                 logger.error(f"Failed to send urgent alert for issue {issue_id}: {e}", exc_info=True)
+        
+        ### ИЗМЕНЕНИЯ ЗДЕСЬ ###
+        # Формируем новое, более дружелюбное финальное сообщение
+        final_text = (
+            f"✅ Готово! Ваша заявка №{issue_id} принята в работу.\n\n"
+            f"{'🚨 Это срочное обращение! Мы уже занимаемся ей.' if is_urgent else '⏳ Ожидайте ответа специалиста.'}"
+        )
+
         await send_and_remember(
             update,
             context,
-            f"✅ Заявка принята!\n\n"
-            f"{'🚨 Срочное обращение! Директор уведомлен.' if context.user_data['is_urgent'] else '⏳ Ожидайте ответа в течение 24 часов.'}\n"
-            f"Номер заявки: #{issue_id}",
-            main_menu_keyboard(update.effective_user.id, SUPPORT_ROLES["user"], user_type=USER_TYPES["resident"])
+            final_text, # Используем новую переменную с текстом
+            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["resident"])
         )
-        # Update user_type in database
+        
+        # Обновление типа пользователя в базе данных
         conn = None
         try:
             conn = get_db_connection()
@@ -1268,9 +1303,11 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         finally:
             if conn:
                 release_db_connection(conn)
+        
         context.user_data.clear()
         context.user_data["user_type"] = USER_TYPES["resident"]
         logger.info(f"Cleared user_data and set user_type to resident for user {update.effective_user.id}")
+
     except ValueError as e:
         logger.error(f"Validation error in process_problem_report for user {update.effective_user.id}: {e}, user_data: {context.user_data}")
         await send_and_remember(
@@ -1284,7 +1321,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         await send_and_remember(
             update,
             context,
-            f"❌ Ошибка базы данных при сохранении заявки: {e}. аПопробуйте позже.",
+            "❌ Ошибка базы данных при сохранении заявки. Попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["resident"])
         )
     except Exception as e:
@@ -1292,7 +1329,7 @@ async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_T
         await send_and_remember(
             update,
             context,
-            f"❌ Произошла ошибка при сохранении заявки: {e}. Попробуйте позже.",
+            "❌ Произошла непредвиденная ошибка. Попробуйте позже.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id), user_type=USER_TYPES["resident"])
         )
 
@@ -3274,57 +3311,64 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id if update and update.effective_user else "unknown"
     
-    # Notify director for critical errors
+    # Уведомление директора о критических ошибках (кроме сетевых)
     if not isinstance(error, (NetworkError, TimedOut)):
         try:
             if DIRECTOR_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=DIRECTOR_CHAT_ID,
-                    text=f"⚠️ Критическая ошибка в боте:\n"
-                         f"Пользователь: {user_id}\n"
-                         f"Ошибка: {str(error)[:200]}"
+                    text=(
+                        f"⚠️ Критическая ошибка в боте:\n"
+                        f"Пользователь: {user_id}\n"
+                        f"Ошибка: {str(error)[:200]}"
+                    )
                 )
-                logger.info(f"Notified director about critical error for user {user_id}")
         except Exception as e:
             logger.error(f"Failed to notify director: {e}")
 
-    # Handle specific error types
-    if isinstance(error, (NetworkError, TimedOut)):
-        logger.warning(f"⚠️ Network error occurred: {error}. Attempting to reconnect...")
-        if update and update.effective_user:
+    # Обработка конкретных типов ошибок для пользователя
+    if update and update.effective_chat:
+        # Сетевые ошибки
+        if isinstance(error, (NetworkError, TimedOut)):
+            logger.warning(f"Network error occurred: {error}.")
             await send_and_remember(
-                update,
-                context,
-                "⚠️ Проблема с сетью. Пожалуйста, попробуйте позже.",
-                main_menu_keyboard(user_id, await get_user_role(user_id))
+                update, context, "⚠️ Проблема с сетью. Пожалуйста, попробуйте позже."
             )
-        return
-    
-    if isinstance(error, KeyError) and "resident" in str(error):
-        logger.error(f"KeyError: 'resident' not found in SUPPORT_ROLES, user_id: {user_id}")
-        if update and update.effective_user:
-            await send_and_remember(
-                update,
-                context,
-                "❌ Ошибка: роль 'resident' не определена. Пожалуйста, свяжитесь с администратором.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="start")]])
-            )
-        return
-    
-    # Clear user_data only for state-related errors
-    if isinstance(error, (KeyError, ValueError)):
-        if update and update.effective_user:
+            return
+
+        # Ошибки неверного ввода данных
+        if isinstance(error, ValueError):
+            logger.warning(f"ValueError for user {user_id}: {error}. Sending specific feedback.")
+            # Очищаем состояние пользователя, чтобы он мог начать заново
             context.user_data.clear()
-            logger.info(f"Cleared user_data for user {user_id} due to state-related error")
-    
-    if update and update.effective_user:
+            await send_and_remember(
+                update,
+                context,
+                "🤔 Похоже, вы ввели данные в неверном формате. Пожалуйста, вернитесь в главное меню и попробуйте снова.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В главное меню", callback_data="back_to_main")]])
+            )
+            return
+            
+        # Другие ошибки состояния (например, отсутствие ключа)
+        if isinstance(error, KeyError):
+            logger.warning(f"KeyError for user {user_id}: {error}. Resetting state.")
+            context.user_data.clear()
+            await send_and_remember(
+                update,
+                context,
+                "🤔 Произошла внутренняя ошибка состояния. Ваше действие было сброшено. Пожалуйста, начните заново из главного меню.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 В главное меню", callback_data="back_to_main")]])
+            )
+            return
+
+        # Все остальные, самые неожиданные ошибки
         await send_and_remember(
             update,
             context,
-            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в техподдержку.",
+            "⚠️ Произошла непредвиденная ошибка. Мы уже работаем над решением. Пожалуйста, попробуйте позже.",
             main_menu_keyboard(user_id, await get_user_role(user_id))
         )
-
+        
 import threading
 from http.server import HTTPServer
 
@@ -3541,7 +3585,6 @@ async def choose_request_type(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif request_type == 'voice_request':
         keyboard = [
             [
-                # ИЗМЕНЕНИЕ: Добавляем полные коды языков для совместимости
                 InlineKeyboardButton("Русский", callback_data='lang_ru-RU'),
                 InlineKeyboardButton("Қазақша", callback_data='lang_kk-KZ')
             ]
@@ -3550,12 +3593,21 @@ async def choose_request_type(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("На каком языке вам удобнее говорить?", reply_markup=reply_markup)
         return CHOOSE_VOICE_LANGUAGE
         
+    ### ИЗМЕНЕНИЯ ЗДЕСЬ ###
     elif request_type == 'photo_request':
-        await query.edit_message_text("Пожалуйста, отправьте фото и обязательно добавьте к нему текстовое описание проблемы в одном сообщении.")
+        text = (
+            "Отлично! Теперь, пожалуйста, прикрепите фото и **в том же сообщении** напишите, в чем проблема.\n\n"
+            "*Например: прикрепите фото сломанной ручки и подпишите «Сломалась ручка на двери в подъезде №1»*."
+        )
+        await query.edit_message_text(text, parse_mode='Markdown')
         return GET_PHOTO_REQUEST
         
     elif request_type == 'video_request':
-        await query.edit_message_text("Пожалуйста, отправьте видео и обязательно добавьте к нему текстовое описание проблемы в одном сообщении.")
+        text = (
+            "Отлично! Теперь, пожалуйста, прикрепите видео и **в том же сообщении** напишите, в чем проблема.\n\n"
+            "*Например: прикрепите видео протекающей трубы и подпишите «Протекает труба в подвале»*."
+        )
+        await query.edit_message_text(text, parse_mode='Markdown')
         return GET_VIDEO_REQUEST
 
 async def choose_voice_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
