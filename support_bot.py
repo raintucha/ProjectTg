@@ -3532,13 +3532,19 @@ async def new_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
 async def choose_request_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает выбор типа заявки."""
+    """Обрабатывает выбор типа заявки с возможностью вернуться назад."""
     query = update.callback_query
     await query.answer()
     request_type = query.data
 
+    # Создаем универсальную кнопку "Назад"
+    back_button = InlineKeyboardButton("🔙 Назад к выбору типа", callback_data='back_to_request_type')
+
     if request_type == 'text_request':
-        await query.edit_message_text("Пожалуйста, опишите вашу проблему текстом:")
+        await query.edit_message_text(
+            "Пожалуйста, опишите вашу проблему текстом:",
+            reply_markup=InlineKeyboardMarkup([[back_button]])
+        )
         return GET_TEXT_REQUEST
         
     elif request_type == 'voice_request':
@@ -3546,19 +3552,23 @@ async def choose_request_type(update: Update, context: ContextTypes.DEFAULT_TYPE
             [
                 InlineKeyboardButton("Русский", callback_data='lang_ru-RU'),
                 InlineKeyboardButton("Қазақша", callback_data='lang_kk-KZ')
-            ]
+            ],
+            [back_button] # Добавляем кнопку "Назад"
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("На каком языке вам удобнее говорить?", reply_markup=reply_markup)
         return CHOOSE_VOICE_LANGUAGE
         
-    ### ИЗМЕНЕНИЯ ЗДЕСЬ ###
     elif request_type == 'photo_request':
         text = (
             "Отлично! Теперь, пожалуйста, прикрепите фото и **в том же сообщении** напишите, в чем проблема.\n\n"
             "*Например: прикрепите фото сломанной ручки и подпишите «Сломалась ручка на двери в подъезде №1»*."
         )
-        await query.edit_message_text(text, parse_mode='Markdown')
+        await query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[back_button]])
+        )
         return GET_PHOTO_REQUEST
         
     elif request_type == 'video_request':
@@ -3566,7 +3576,11 @@ async def choose_request_type(update: Update, context: ContextTypes.DEFAULT_TYPE
             "Отлично! Теперь, пожалуйста, прикрепите видео и **в том же сообщении** напишите, в чем проблема.\n\n"
             "*Например: прикрепите видео протекающей трубы и подпишите «Протекает труба в подвале»*."
         )
-        await query.edit_message_text(text, parse_mode='Markdown')
+        await query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[back_button]])
+        )
         return GET_VIDEO_REQUEST
 
 async def choose_voice_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3574,15 +3588,23 @@ async def choose_voice_language(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
-    # ИСПРАВЛЕНО: Правильно извлекаем код языка (например, 'ru-RU')
+    # Этот блок нужен, чтобы обработать нажатие кнопки "Назад" на этом шаге
+    if query.data == 'back_to_request_type':
+        return await new_request_start(update, context)
+
     lang_code = query.data.split('_')[1] 
     context.user_data['language'] = lang_code
     
-    # ИСПРАВЛЕНО: Правильно находим текстовое описание языка
     language_map = {'ru-RU': 'русском', 'kk-KZ': 'казахском'}
     selected_lang_text = language_map.get(lang_code, "выбранном")
     
-    await query.edit_message_text(f"Отлично! Теперь запишите и отправьте мне голосовое сообщение на {selected_lang_text} языке.")
+    # Кнопка для возврата к выбору типа заявки (текст, фото и т.д.)
+    back_button = InlineKeyboardButton("🔙 Назад к выбору типа", callback_data='back_to_request_type')
+    
+    await query.edit_message_text(
+        f"Отлично! Теперь запишите и отправьте мне голосовое сообщение на {selected_lang_text} языке.",
+        reply_markup=InlineKeyboardMarkup([[back_button]])
+    )
     return GET_VOICE_REQUEST
 
 async def get_text_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3668,15 +3690,35 @@ def main() -> None:
             )
 
             # --- ОБРАБОТЧИК ДИАЛОГА СОЗДАНИЯ ЗАЯВКИ ---
+# --- ВНУТРИ ФУНКЦИИ main() ---
+
+# --- ОБРАБОТЧИК ДИАЛОГА СОЗДАНИЯ ЗАЯВКИ ---
             request_conv_handler = ConversationHandler(
                 entry_points=[CallbackQueryHandler(new_request_start, pattern='^new_request$')],
                 states={
-                    CHOOSE_REQUEST_TYPE: [CallbackQueryHandler(choose_request_type, pattern='^(text|voice|photo|video)_request$')],
-                    GET_TEXT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_text_request)],
-                    CHOOSE_VOICE_LANGUAGE: [CallbackQueryHandler(choose_voice_language, pattern='^lang_(ru-RU|kk-KZ)$')],
-                    GET_VOICE_REQUEST: [MessageHandler(filters.VOICE, get_voice_request)],
-                    GET_PHOTO_REQUEST: [MessageHandler(filters.PHOTO, get_photo_request)],
-                    GET_VIDEO_REQUEST: [MessageHandler(filters.VIDEO, get_video_request)],
+                    CHOOSE_REQUEST_TYPE: [
+                        CallbackQueryHandler(choose_request_type, pattern='^(text|voice|photo|video)_request$')
+                    ],
+                    GET_TEXT_REQUEST: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, get_text_request),
+                        CallbackQueryHandler(new_request_start, pattern='^back_to_request_type$')
+                    ],
+                    CHOOSE_VOICE_LANGUAGE: [
+                        CallbackQueryHandler(choose_voice_language, pattern='^lang_(ru-RU|kk-KZ)$'),
+                        CallbackQueryHandler(new_request_start, pattern='^back_to_request_type$')
+                    ],
+                    GET_VOICE_REQUEST: [
+                        MessageHandler(filters.VOICE, get_voice_request),
+                        CallbackQueryHandler(new_request_start, pattern='^back_to_request_type$')
+                    ],
+                    GET_PHOTO_REQUEST: [
+                        MessageHandler(filters.PHOTO, get_photo_request),
+                        CallbackQueryHandler(new_request_start, pattern='^back_to_request_type$')
+                    ],
+                    GET_VIDEO_REQUEST: [
+                        MessageHandler(filters.VIDEO, get_video_request),
+                        CallbackQueryHandler(new_request_start, pattern='^back_to_request_type$')
+                    ],
                 },
                 fallbacks=[CallbackQueryHandler(cancel_request, pattern='^cancel_request$')],
             )
