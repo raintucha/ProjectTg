@@ -1855,64 +1855,101 @@ async def save_solution(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             release_db_connection(conn)
 
+# support_bot.py
+
 async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show urgent requests for agents with individual detail buttons."""
-    if not await is_agent(update.effective_user.id):
+    """Show urgent requests for agents with pagination."""
+    user_id = update.effective_user.id
+    if not await is_agent(user_id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
+
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT i.issue_id, r.full_name, i.description, i.created_at, r.address, r.phone
+                SELECT i.issue_id, r.full_name, i.description, i.created_at, i.category
                 FROM issues i
                 JOIN residents r ON i.resident_id = r.resident_id
                 WHERE i.status = 'new' AND i.category = 'urgent'
-                ORDER BY i.created_at DESC
-                LIMIT 20
+                ORDER BY i.created_at ASC
                 """
             )
-            requests = cur.fetchall()
+            all_requests = cur.fetchall()
 
-        if not requests:
+        if not all_requests:
             await send_and_remember(
                 update,
                 context,
-                "📭 Нет срочных заявок.",
-                main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+                "📭 Нет активных срочных заявок.",
+                main_menu_keyboard(user_id, await get_user_role(user_id))
             )
             return
 
-        for req in requests:
-            issue_id, full_name, description, created_at, address, phone = req
-            text = (
-                f"🆔 Номер: #{issue_id}\n"
-                f"👤 От: {full_name}\n"
-                f"🏠 Адрес: {address}\n"
-                f"📱 Телефон: {phone}\n"
-                f"📅 Дата: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
-                f"🚨 Тип: Срочная\n"
-                f"📝 Описание: {description[:100]}{'...' if len(description) > 100 else ''}\n"
+        # Логика пагинации (постраничного вывода)
+        page_key = f"urgent_requests_page_{user_id}"
+        page = context.user_data.get(page_key, 0)
+        items_per_page = 5
+        start_index = page * items_per_page
+        end_index = start_index + items_per_page
+        
+        paginated_requests = all_requests[start_index:end_index]
+        total_pages = (len(all_requests) + items_per_page - 1) // items_per_page
+        total_requests = len(all_requests)
+
+        if not paginated_requests:
+            await send_and_remember(update, context, "📭 Больше срочных заявок нет.")
+            return
+
+        text = f"🚨 Срочные заявки (Страница {page + 1}/{total_pages}, Всего: {total_requests}):\n\n"
+        keyboard = []
+        for req in paginated_requests:
+            issue_id, full_name, description, created_at, category = req
+            
+            # Обработка описания для медиафайлов
+            display_description = description
+            if description.startswith("[Фото]"):
+                display_description = "🖼️ " + description.replace("[Фото] ", "", 1)
+            elif description.startswith("[Видео]"):
+                display_description = "📹 " + description.replace("[Видео] ", "", 1)
+            elif description.startswith("[Голосовое сообщение]"):
+                display_description = "🎤 " + description.replace("[Голосовое сообщение] ", "", 1)
+
+            text += (
+                f"🆔 #{issue_id} от {created_at.strftime('%d.%m')} - {full_name}\n"
+                f"📝 {display_description[:40]}{'...' if len(display_description) > 40 else ''}\n\n"
             )
-            keyboard = [
-                [InlineKeyboardButton("🔍 Подробности", callback_data=f"request_detail_{issue_id}")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-            ]
-            await send_and_remember(
-                update,
-                context,
-                text,
-                InlineKeyboardMarkup(keyboard),
-            )
+            keyboard.append([InlineKeyboardButton(f"🔍 Смотреть заявку #{issue_id}", callback_data=f"request_detail_{issue_id}")])
+
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data="urg_prev"))
+        if end_index < len(all_requests):
+            nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data="urg_next"))
+        nav_buttons.append(InlineKeyboardButton("🔄 Обновить", callback_data="urg_refresh"))
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+            
+        keyboard.append([InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")])
+
+        await send_and_remember(
+            update,
+            context,
+            text,
+            InlineKeyboardMarkup(keyboard),
+        )
+
     except psycopg2.Error as e:
         logger.error(f"Error retrieving urgent requests: {e}")
         await send_and_remember(
             update,
             context,
             "❌ Ошибка при получении данных.",
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            main_menu_keyboard(user_id, await get_user_role(user_id)),
         )
     finally:
         if conn:
@@ -2279,19 +2316,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Processing button: {query.data} for user {user_id}")
 
     try:
-        page_key = f"active_requests_page_{user_id}"
+        active_page_key = f"active_requests_page_{user_id}"
+        urgent_page_key = f"urgent_requests_page_{user_id}"
 
         if query.data == "req_prev":
-            page = context.user_data.get(page_key, 0)
+            page = context.user_data.get(active_page_key, 0)
             if page > 0:
-                context.user_data[page_key] = page - 1
+                context.user_data[active_page_key] = page - 1
             await show_active_requests(update, context)
             return
             
         elif query.data == "req_next":
-            page = context.user_data.get(page_key, 0)
-            context.user_data[page_key] = page + 1
+            page = context.user_data.get(active_page_key, 0)
+            context.user_data[active_page_key] = page + 1
             await show_active_requests(update, context)
+            return
+
+        elif query.data == "urg_prev":
+            page = context.user_data.get(urgent_page_key, 0)
+            if page > 0:
+                context.user_data[urgent_page_key] = page - 1
+            await show_urgent_requests(update, context)
+            return
+            
+        elif query.data == "urg_next":
+            page = context.user_data.get(urgent_page_key, 0)
+            context.user_data[urgent_page_key] = page + 1
+            await show_urgent_requests(update, context)
             return
 
         elif query.data == "do_nothing":
@@ -2366,9 +2417,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"User {user_id} pressed 'help' button")
             await show_help(update, context)
         elif query.data == "active_requests":
-            context.user_data[page_key] = 0
+            context.user_data[active_page_key] = 0
             await show_active_requests(update, context)
         elif query.data == "urgent_requests":
+            context.user_data[urgent_page_key] = 0
             await show_urgent_requests(update, context)
         elif query.data == "completed_requests":
             await completed_requests(update, context)
@@ -2420,6 +2472,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await delete_agent(update, context, agent_id_to_delete)
         elif query.data == "req_refresh":
             await show_active_requests(update, context)
+        elif query.data == "urg_refresh":
+            await show_urgent_requests(update, context)
         elif query.data == "add_agent":
             await add_agent(update, context)
         elif query.data == "cancel":
