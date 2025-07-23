@@ -1104,7 +1104,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• **Техническая поддержка бота:**\n"
         "Если бот не работает или вы заметили ошибку, напишите @ShiroOni99.\n\n"
         "📞 **Контакты Управляющей Компании:**\n"
-        "Телефон: `+7 (777) 123-45-67`\n"
+        "Телефон: `+7 (777) 755 8808`\n"
         "Часы работы: Пн-Пт, с 9:00 до 18:00"
     )
     
@@ -1130,41 +1130,7 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = None
     try:
         conn = get_db_connection()
-        logger.info("Database connection established")
         with conn.cursor() as cur:
-            # Check if table exists
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'residents'
-                )
-            """)
-            if not cur.fetchone()[0]:
-                logger.error("Table 'residents' does not exist")
-                await send_and_remember(
-                    update,
-                    context,
-                    "❌ Ошибка: таблица residents не найдена.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-                )
-                return
-            # Check issues table
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'issues'
-                )
-            """)
-            if not cur.fetchone()[0]:
-                logger.error("Table 'issues' does not exist")
-                await send_and_remember(
-                    update,
-                    context,
-                    "❌ Ошибка: таблица issues не найдена.",
-                    main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
-                )
-                return
-
             cur.execute(
                 """
                 SELECT i.issue_id, i.description, i.category, i.status, i.created_at 
@@ -1177,7 +1143,6 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 (update.effective_user.id,),
             )
             requests = cur.fetchall()
-            logger.info(f"Found {len(requests)} requests for user {update.effective_user.id}")
 
         if not requests:
             await send_and_remember(
@@ -1188,35 +1153,42 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
-        text = "📋 Ваши последние заявки:\n\n"
+        text = "📋 Ваши последние 5 заявок:\n\n"
         for req in requests:
             text += (
-                f"🆔 Номер: #{req[0]}\n"
-                f"📅 Дата: {req[4].strftime('%d.%m.%Y %H:%M')}\n"
-                f"🚨 Тип: {'Срочная' if req[2] == 'urgent' else 'Обычная'}\n"
-                f"📝 Описание: {req[1][:100]}{'...' if len(req[1]) > 100 else ''}\n"
-                f"🟢 Статус: {req[3]}\n\n"
+                f"🆔 **Номер:** #{req[0]}\n"
+                f"📅 **Дата:** {req[4].strftime('%d.%m.%Y %H:%M')}\n"
+                f"📝 **Описание:** {req[1][:100]}{'...' if len(req[1]) > 100 else ''}\n"
+                f"⚙️ **Статус:** {req[3]}\n\n"
             )
+        
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        # Создаём клавиатуру только с одной кнопкой "назад"
+        keyboard = [
+            [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Отправляем сообщение с новой, простой клавиатурой
         await send_and_remember(
             update,
             context,
             text,
-            main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
+            reply_markup,
         )
+        
     except psycopg2.Error as e:
         logger.error(f"Error retrieving user requests for {update.effective_user.id}: {e}")
         await send_and_remember(
             update,
             context,
-            f"❌ Ошибка базы данных: {e}",
+            "❌ Ошибка базы данных при получении данных.",
             main_menu_keyboard(update.effective_user.id, await get_user_role(update.effective_user.id)),
         )
     finally:
         if conn:
-            logger.info("Closing database connection")
             release_db_connection(conn)
-
+            
 async def process_problem_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process problem description and ensure user_type is updated to resident."""
     if not context.user_data.get("awaiting_problem"):
