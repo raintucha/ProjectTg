@@ -1573,6 +1573,8 @@ async def process_user_address(update: Update, context: ContextTypes.DEFAULT_TYP
 async def show_active_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active requests for agents with pagination."""
     user_id = update.effective_user.id
+    context.user_data['last_request_list'] = 'active_requests'
+
     if not await is_agent(user_id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
@@ -1717,10 +1719,13 @@ async def show_request_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"📝 **Описание проблемы:**\n{display_description}" # Используем очищенный текст
         )
         
+        back_callback = context.user_data.get('last_request_list', 'active_requests')
+
         keyboard = [
             [InlineKeyboardButton("✅ Завершить заявку", callback_data=f"complete_request_{issue_id}")],
             [InlineKeyboardButton("📨 Написать пользователю", callback_data=f"message_user_{resident_chat_id}")],
-            [InlineKeyboardButton("🔙 Назад к списку", callback_data="active_requests")],
+            # Используем переменную для правильного возврата
+            [InlineKeyboardButton("🔙 Назад к списку", callback_data=back_callback)],
         ]
         
         await send_and_remember(update, context, text, InlineKeyboardMarkup(keyboard))
@@ -1860,6 +1865,8 @@ async def save_solution(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_urgent_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show urgent requests for agents with pagination."""
     user_id = update.effective_user.id
+    context.user_data['last_request_list'] = 'urgent_requests'
+
     if not await is_agent(user_id):
         await update.callback_query.answer("❌ Доступ запрещен", show_alert=True)
         return
