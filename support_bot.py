@@ -3628,10 +3628,13 @@ async def get_video_request(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ConversationHandler.END
 
 async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отменяет процесс создания заявки."""
+    """Отменяет процесс создания заявки и возвращает в главное меню."""
     query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("Создание заявки отменено.")
+    await query.answer("Действие отменено") # Короткое всплывающее уведомление
+    
+    # Вызываем функцию, которая строит и отправляет правильное главное меню
+    await main_menu(update, context)
+    
     return ConversationHandler.END
 # Remove the standalone application.add_handler line
 # Update the main() function (near the end of the file) as follows:
