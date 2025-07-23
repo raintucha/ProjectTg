@@ -1471,7 +1471,9 @@ async def send_urgent_alert(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         [
                             InlineKeyboardButton("🔍 Подробнее", callback_data=f"request_detail_{issue_id}"),
                             InlineKeyboardButton("📨 Ответить", callback_data=f"message_user_{user.id}")
+                            
                         ],
+                        [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
                     ])
                 )
                 logger.info(f"Срочное уведомление отправлено {chat_id}")
