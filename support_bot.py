@@ -2514,22 +2514,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 main_menu_keyboard(user_id, saved_role, is_in_main_menu=True, user_type=saved_user_type)
             )
         elif query.data == "back_to_main":
-            current_role = await get_user_role(user_id, context)
-            current_user_type = context.user_data.get("user_type", "unknown")
-            if current_role == SUPPORT_ROLES["admin"]:
-                welcome_text = "👑 Административное меню:"
-            elif current_role == SUPPORT_ROLES["agent"]:
-                welcome_text = "👷 Панель сотрудника:"
-            elif current_role == SUPPORT_ROLES["user"] and current_user_type == USER_TYPES["resident"]:
-                welcome_text = "🏠 Главное меню:"
-            else:
-                welcome_text = "👋 Добро пожаловать! Пожалуйста, выберите действие:"
-            await send_and_remember(
-                update,
-                context,
-                welcome_text,
-                main_menu_keyboard(user_id, current_role, is_in_main_menu=True, user_type=current_user_type)
-            )
+            await main_menu(update, context)
         else:
             logger.warning(f"Unknown command: {query.data}")
             await send_and_remember(
