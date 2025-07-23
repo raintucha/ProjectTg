@@ -1386,9 +1386,6 @@ async def save_request_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE,
             conn.commit()
             logger.info(f"Logged issue creation for issue ID {issue_id}")
 
-        if is_urgent:
-             context.user_data['problem_text'] = current_problem_text
-             await send_urgent_alert(update, context, issue_id)
 
         return issue_id
 
