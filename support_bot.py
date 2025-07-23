@@ -903,7 +903,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["user_type"] = user_type
     logger.info(f"User {chat_id} has role: {role} and user_type: {user_type}")
 
-    ### ИЗМЕНЕНИЯ ЗДЕСЬ: Логика для счетчиков и улучшенных меню ###
     counts = {'active': 0, 'urgent': 0}
     if role in [SUPPORT_ROLES["agent"], SUPPORT_ROLES["admin"]]:
         conn = None
@@ -934,7 +933,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 Меню администратора:",
             main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type, counts=counts)
         )
+    
+    ### ИЗМЕНЕНИЕ ЗДЕСЬ ###
     elif role == SUPPORT_ROLES["agent"]:
+        # Старый код удален. Теперь агент сразу видит свое главное меню.
         await send_and_remember(
             update,
             context,
@@ -942,7 +944,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              main_menu_keyboard(chat_id, role, is_in_main_menu=True, user_type=user_type, counts=counts)
         )
     else:
-        # Улучшенное меню для нового пользователя
+        # Меню для нового пользователя
         keyboard = [
             [InlineKeyboardButton("🏠 Я здесь живу", callback_data="register_as_resident")],
             [InlineKeyboardButton("🛒 Хочу купить квартиру", callback_data="select_potential_buyer")]
@@ -3735,7 +3737,7 @@ def main() -> None:
             stop_health_server()
             logger.info("🔄 Restarting in 10 seconds...")
             time.sleep(10)
-            
+
 if __name__ == '__main__':
     logger.info("🛠 Starting application...")
     time.sleep(8) # Даем время на запуск зависимых сервисов, например, БД
