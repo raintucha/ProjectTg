@@ -860,10 +860,18 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_user.id
     
     role = await get_user_role(chat_id)
-    user_type = await get_user_type(chat_id)
-    
     context.user_data["role"] = role
-    context.user_data["user_type"] = user_type
+
+    # --- ИСПРАВЛЕННАЯ ЛОГИКА ---
+    # Сначала смотрим в памяти.
+    user_type = context.user_data.get("user_type")
+    
+    # Если в памяти ничего нет (это не "потенциальный покупатель"),
+    # тогда идем в базу данных.
+    if not user_type:
+        user_type = await get_user_type(chat_id)
+        # И сохраняем в память то, что нашли в базе.
+        context.user_data["user_type"] = user_type 
 
     ### ИЗМЕНЕНИЯ ЗДЕСЬ: Логика для счетчиков ###
     counts = {'active': 0, 'urgent': 0}
@@ -2495,24 +2503,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif query.data == "add_agent":
             await add_agent(update, context)
         elif query.data == "cancel":
-            saved_user_type = context.user_data.get("user_type")
-            saved_role = role
-            context.user_data.clear()
-            context.user_data["user_type"] = saved_user_type
-            if saved_role == SUPPORT_ROLES["admin"]:
-                welcome_text = "👑 Административное меню:"
-            elif saved_role == SUPPORT_ROLES["agent"]:
-                welcome_text = "👷 Панель сотрудника:"
-            elif saved_role == SUPPORT_ROLES["user"] and saved_user_type == USER_TYPES["resident"]:
-                welcome_text = "🏠 Главное меню:"
-            else:
-                welcome_text = "🏠 Главное меню:"
-            await send_and_remember(
-                update,
-                context,
-                welcome_text,
-                main_menu_keyboard(user_id, saved_role, is_in_main_menu=True, user_type=saved_user_type)
-            )
+
+            context.user_data.pop("awaiting_sales_question", None)
+            context.user_data.pop("awaiting_name", None)
+            context.user_data.pop("registration_flow", None)
+            context.user_data.pop("reply_to_user", None)
+
+            logger.info(f"User {update.effective_user.id} отменил действие. Возвращаемся в главное меню.")
+
+            await main_menu(update, context)
+
         elif query.data == "back_to_main":
             await main_menu(update, context)
         else:
